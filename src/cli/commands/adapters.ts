@@ -1,5 +1,9 @@
 import type { Command } from '@commander-js/extra-typings';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { z } from 'zod';
 
@@ -130,22 +134,42 @@ export function codexManagedLaunchContext(
 async function launchCodex(args: readonly string[], repoRoot: string): Promise<void> {
   const port = await availablePort();
   const url = `ws://127.0.0.1:${String(port)}`;
+  const tokenDirectory = mkdtempSync(join(tmpdir(), 'concord-codex-'));
+  const tokenFile = join(tokenDirectory, 'app-server.token');
+  const token = randomBytes(32).toString('base64url');
+  writeFileSync(tokenFile, `${token}\n`, { mode: 0o600, flag: 'wx' });
   // The app-server, not the remote TUI, owns MCP child processes. Give both
   // processes the URL so SessionStart's detached Concord host inherits it and
   // connects back to this exact server instead of falling back to daemon proxy.
   // Codex intentionally filters the environment of MCP children, so also run
   // the complete managed tree from the resolved repository root.
-  const context = codexManagedLaunchContext(repoRoot, url, process.env);
-  const server = spawn('codex', ['app-server', '--listen', url], {
-    ...context,
-    stdio: ['ignore', 'ignore', 'inherit'],
+  const context = codexManagedLaunchContext(repoRoot, url, {
+    ...process.env,
+    CONCORD_CODEX_APP_SERVER_TOKEN_FILE: tokenFile,
   });
+  const server = spawn(
+    'codex',
+    ['app-server', '--listen', url, '--ws-auth', 'capability-token', '--ws-token-file', tokenFile],
+    {
+      ...context,
+      stdio: ['ignore', 'ignore', 'inherit'],
+    },
+  );
   try {
     await waitForCodexServer(url, server);
-    const tui = spawn('codex', ['--remote', url, ...args], {
-      ...context,
-      stdio: 'inherit',
-    });
+    const tui = spawn(
+      'codex',
+      ['--remote', url, '--remote-auth-token-env', 'CONCORD_CODEX_REMOTE_AUTH_TOKEN', ...args],
+      {
+        ...context,
+        env: {
+          ...context.env,
+          CONCORD_CODEX_APP_SERVER_TOKEN_FILE: tokenFile,
+          CONCORD_CODEX_REMOTE_AUTH_TOKEN: token,
+        },
+        stdio: 'inherit',
+      },
+    );
     const code = await new Promise<number | null>((resolve, reject) => {
       tui.once('error', reject);
       tui.once('exit', resolve);
@@ -153,6 +177,7 @@ async function launchCodex(args: readonly string[], repoRoot: string): Promise<v
     if (code !== null && code !== 0) process.exitCode = code;
   } finally {
     server.kill();
+    rmSync(tokenDirectory, { recursive: true, force: true });
   }
 }
 

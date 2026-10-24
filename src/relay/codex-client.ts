@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import { z } from 'zod';
 
@@ -40,6 +41,7 @@ export class CodexDaemonClient {
     private readonly command = 'codex',
     private readonly args: readonly string[] = ['app-server', 'proxy'],
     private readonly remoteUrl = process.env['CONCORD_CODEX_APP_SERVER_URL'],
+    private readonly remoteTokenFile = process.env['CONCORD_CODEX_APP_SERVER_TOKEN_FILE'],
   ) {}
 
   currentTurnId(): string | undefined {
@@ -116,8 +118,16 @@ export class CodexDaemonClient {
   }
 
   private async connectSocket(url: string): Promise<void> {
+    const token =
+      this.remoteTokenFile === undefined
+        ? undefined
+        : readFileSync(this.remoteTokenFile, 'utf8').trim();
+    if (token === '') throw new Error('Codex app-server token file is empty.');
     await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(url);
+      const socket = new WebSocket(
+        url,
+        token === undefined ? undefined : { headers: { Authorization: `Bearer ${token}` } },
+      );
       const fail = (): void => {
         reject(new Error(`Unable to connect to Codex app-server at ${url}.`));
       };
