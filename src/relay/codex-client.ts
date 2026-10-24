@@ -33,6 +33,8 @@ export class CodexDaemonClient {
   private readonly pending = new Map<number, PendingRequest>();
   private activeTurnId: string | undefined;
   private readonly listeners: ((notification: CodexNotification) => void)[] = [];
+  private readonly disconnectListeners: (() => void)[] = [];
+  private disconnected = false;
 
   constructor(
     private readonly command = 'codex',
@@ -47,6 +49,12 @@ export class CodexDaemonClient {
   /** Receive every app-server notification (item and turn events). */
   onNotification(listener: (notification: CodexNotification) => void): void {
     this.listeners.push(listener);
+  }
+
+  /** Called when the app-server socket or proxy process ends unexpectedly. */
+  onDisconnect(listener: () => void): void {
+    if (this.disconnected) listener();
+    else this.disconnectListeners.push(listener);
   }
 
   async connect(): Promise<void> {
@@ -172,5 +180,9 @@ export class CodexDaemonClient {
     this.pending.clear();
     this.child = undefined;
     this.socket = undefined;
+    if (this.disconnected) return;
+    this.disconnected = true;
+    for (const listener of this.disconnectListeners) listener();
+    this.disconnectListeners.length = 0;
   }
 }

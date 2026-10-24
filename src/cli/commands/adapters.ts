@@ -13,7 +13,7 @@ import { CodexAppServerAdapter } from '../../relay/adapters.js';
 import { CodexDaemonClient } from '../../relay/codex-client.js';
 import { CodexReadTracker } from '../../relay/codex-read-tracker.js';
 import { sessionKey } from '../../domain/receipts.js';
-import { startAgentRelay } from '../../relay/server.js';
+import { startAgentRelay, type RunningAgentRelay } from '../../relay/server.js';
 import {
   installGlobalAdapters,
   renderAdapterReport,
@@ -66,19 +66,34 @@ async function hostCodex(agentId: string, threadId: string): Promise<void> {
     pullFallback: true,
     session,
   });
+  await keepCodexHostAlive(client, relay);
+}
+
+/** Keep a session relay alive only while its Codex app-server is reachable. */
+export async function keepCodexHostAlive(
+  client: Pick<CodexDaemonClient, 'onDisconnect' | 'close'>,
+  relay: Pick<RunningAgentRelay, 'close'>,
+): Promise<void> {
   const stop = (): void => {
-    void relay.close().finally(() => {
-      client.close();
-      process.exitCode = 0;
-    });
+    resume?.();
   };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  await new Promise<void>((resolve) => {
-    process.once('beforeExit', () => {
-      resolve();
+  let resume: (() => void) | undefined;
+  try {
+    await new Promise<void>((resolve) => {
+      resume = resolve;
+      client.onDisconnect(stop);
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
     });
-  });
+  } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+    try {
+      await relay.close();
+    } finally {
+      client.close();
+    }
+  }
 }
 
 async function waitForCodexServer(url: string, server: ReturnType<typeof spawn>): Promise<void> {
