@@ -31,6 +31,22 @@ function machine(harnesses: readonly string[] = HARNESSES): NodeJS.ProcessEnv & 
 const read = (path: string): string => readFileSync(path, 'utf8');
 
 describe('applyGlobalMode', () => {
+  it('uses messaging-only global instructions when selected by the user', () => {
+    const env = machine(['claude', 'codex']);
+    writeUserConfig(env, { globalInstructions: 'messaging' });
+
+    applyGlobalMode(env, true, { mcp: false });
+
+    for (const path of [
+      join(env.HOME, '.claude', 'CLAUDE.md'),
+      join(env.HOME, '.codex', 'AGENTS.md'),
+    ]) {
+      const instructions = read(path);
+      expect(instructions).toContain('To message an agent');
+      expect(instructions).not.toContain('Before editing');
+    }
+  });
+
   it('registers and instructs each installed harness, then removes only its own additions', () => {
     const env = machine();
     mkdirSync(join(env.HOME, '.claude'));

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import { writeUserConfig } from '../../src/config/user-config.js';
 import { openDatabase } from '../../src/db/connection.js';
 import { createRepositories, type Repositories } from '../../src/db/index.js';
 import {
@@ -15,6 +19,7 @@ import {
   registeredLine,
   registerPullEndpoint,
   watchInbox,
+  workspaceStatus,
 } from '../../src/cli/commands/inbox.js';
 import { effectiveEndpointCapabilities, monitorCapabilityFor } from '../../src/domain/delivery.js';
 import { agentIdForSession } from '../../src/domain/identity.js';
@@ -45,6 +50,21 @@ function send(repos: Repositories, content: string, key: string): string {
   });
   return result.message.messageId;
 }
+
+describe('global hook instructions', () => {
+  it('returns messaging-only text for a globally configured workspace', () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-global-inbox-'));
+    const repo = join(home, 'project');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    const env = { HOME: home };
+    writeUserConfig(env, { globalMode: true, globalInstructions: 'messaging' });
+
+    const status = workspaceStatus(repo, env);
+
+    expect(status['instructions']).toContain('To message an agent');
+    expect(status['instructions']).not.toContain('Before editing');
+  });
+});
 
 describe('pull-transport inbox', () => {
   let repos: Repositories;
