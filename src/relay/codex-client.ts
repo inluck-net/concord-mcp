@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import { z } from 'zod';
 
@@ -33,11 +34,14 @@ export class CodexDaemonClient {
   private readonly pending = new Map<number, PendingRequest>();
   private activeTurnId: string | undefined;
   private readonly listeners: ((notification: CodexNotification) => void)[] = [];
+  private readonly disconnectListeners: (() => void)[] = [];
+  private disconnected = false;
 
   constructor(
     private readonly command = 'codex',
     private readonly args: readonly string[] = ['app-server', 'proxy'],
     private readonly remoteUrl = process.env['CONCORD_CODEX_APP_SERVER_URL'],
+    private readonly remoteTokenFile = process.env['CONCORD_CODEX_APP_SERVER_TOKEN_FILE'],
   ) {}
 
   currentTurnId(): string | undefined {
@@ -47,6 +51,12 @@ export class CodexDaemonClient {
   /** Receive every app-server notification (item and turn events). */
   onNotification(listener: (notification: CodexNotification) => void): void {
     this.listeners.push(listener);
+  }
+
+  /** Called when the app-server socket or proxy process ends unexpectedly. */
+  onDisconnect(listener: () => void): void {
+    if (this.disconnected) listener();
+    else this.disconnectListeners.push(listener);
   }
 
   async connect(): Promise<void> {
@@ -108,8 +118,16 @@ export class CodexDaemonClient {
   }
 
   private async connectSocket(url: string): Promise<void> {
+    const token =
+      this.remoteTokenFile === undefined
+        ? undefined
+        : readFileSync(this.remoteTokenFile, 'utf8').trim();
+    if (token === '') throw new Error('Codex app-server token file is empty.');
     await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(url);
+      const socket = new WebSocket(
+        url,
+        token === undefined ? undefined : { headers: { Authorization: `Bearer ${token}` } },
+      );
       const fail = (): void => {
         reject(new Error(`Unable to connect to Codex app-server at ${url}.`));
       };
@@ -172,5 +190,9 @@ export class CodexDaemonClient {
     this.pending.clear();
     this.child = undefined;
     this.socket = undefined;
+    if (this.disconnected) return;
+    this.disconnected = true;
+    for (const listener of this.disconnectListeners) listener();
+    this.disconnectListeners.length = 0;
   }
 }

@@ -2,9 +2,8 @@
 
 ## 1. Install
 
-```bash
-npm install -g @concord-ai/concord-mcp
-```
+Install the fork's standalone archive from its GitHub Release using
+[`install.sh`](../install.sh). It bundles Node and does not use npm.
 
 ## 2. Set up your repo
 
@@ -43,13 +42,19 @@ concord status
 concord doctor
 ```
 
-`concord setup` installs lifecycle hooks and attempts to bootstrap Codex's
-managed app-server daemon with remote control enabled. On SessionStart the hook
-launches a per-session Concord bridge. The bridge uses the official
+For idle delivery, launch Codex through the Concord adapter:
+
+```bash
+concord adapters codex --
+```
+
+The launcher starts a loopback app-server with a private capability token,
+then starts the TUI with that token. On SessionStart the hook launches a
+per-session Concord bridge. The bridge uses the official
 `turn/steer` request with `expectedTurnId` while a turn is active and
-`turn/start` while idle. If the daemon or bridge probe fails, the endpoint keeps
-the hook-based pull fallback and reports that the message is queued instead of
-claiming immediate delivery.
+`turn/start` while idle. Closing the TUI also closes the bridge. Plain `codex`
+sessions use hook-based pull delivery; `concord adapters doctor` does not
+advertise idle delivery for them. Setup does not enable remote control.
 
 Codex app-server delivery is version-gated to the verified protocol baseline.
 Run `concord adapters doctor` after upgrades; `unsupported_version` deliberately

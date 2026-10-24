@@ -8,7 +8,7 @@ import { claudeConfigDir } from './claude-plugin.js';
 import { codexHome } from './codex-config.js';
 import { copilotHome } from './copilot-config.js';
 import { gooseConfigPath } from './goose-config.js';
-import { ANTIGRAVITY_RULE_HEADER, CONCORD_GLOBAL_INSTRUCTIONS } from './instructions.js';
+import { ANTIGRAVITY_RULE_HEADER, globalInstructionsFor } from './instructions.js';
 import {
   CONCORD_SERVER_COMMAND,
   CONCORD_SERVER_KEY,
@@ -44,7 +44,7 @@ interface UserFile {
   /** Set for an MCP registration, which `--no-mcp` skips. */
   readonly registration?: Registration | undefined;
   readonly path: (env: NodeJS.ProcessEnv) => string;
-  readonly install: (existing: string | undefined, path: string) => string;
+  readonly install: (existing: string | undefined, path: string, env: NodeJS.ProcessEnv) => string;
   readonly uninstall: (existing: string) => string;
 }
 
@@ -76,7 +76,8 @@ function instructionFile(
     executable,
     ...(isDetected !== undefined ? { isDetected } : {}),
     path,
-    install: (existing) => upsertBlock(existing ?? header ?? '', CONCORD_GLOBAL_INSTRUCTIONS),
+    install: (existing, _path, env) =>
+      upsertBlock(existing ?? header ?? '', globalInstructionsFor(env)),
     uninstall: (existing) => {
       const rest = removeBlock(existing);
       if (rest.trim() === header?.trim()) {
@@ -171,7 +172,7 @@ function applyFile(
     const existing = exists ? readFileSync(path, 'utf8') : undefined;
     const { registration } = file;
     if (registration !== undefined && !mayChange(registration, enable, existing, owned)) return;
-    const next = enable ? file.install(existing, path) : file.uninstall(existing ?? '');
+    const next = enable ? file.install(existing, path, env) : file.uninstall(existing ?? '');
     if (next !== existing) {
       if (next === '') {
         rmSync(path);

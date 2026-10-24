@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { Command } from '@commander-js/extra-typings';
 
 import { resolveRepoRoot, workspaceIdForRoot } from '../../config/paths.js';
-import { CONCORD_GLOBAL_INSTRUCTIONS } from '../../install/instructions.js';
+import { globalInstructionsFor } from '../../install/instructions.js';
 import type { ClaimOptions, Repositories } from '../../db/index.js';
 import {
   capabilityFor,
@@ -243,7 +243,7 @@ export function workspaceStatus(cwd: string, env: NodeJS.ProcessEnv): Record<str
     workspace_id: workspaceIdForRoot(repoRoot),
     store: store.kind,
     ...(store.kind === 'global'
-      ? { project: store.project, instructions: CONCORD_GLOBAL_INSTRUCTIONS }
+      ? { project: store.project, instructions: globalInstructionsFor(env) }
       : {}),
   };
 }

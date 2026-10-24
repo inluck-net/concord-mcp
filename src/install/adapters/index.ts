@@ -236,16 +236,16 @@ function statusCodex(env: NodeJS.ProcessEnv): AdapterReport {
       detail: `Codex ${version.output || '(unknown version)'} lacks the verified app-server steering contract.`,
     };
   }
-  const daemon = run(executable, ['app-server', 'daemon', 'version'], env);
+  const managed = env['CONCORD_CODEX_APP_SERVER_URL']?.startsWith('ws://127.0.0.1:') === true;
   return {
     harness: config.name,
     detected: true,
-    status: daemon.ok ? 'installed' : 'action_required',
+    status: 'installed',
     monitor: config.monitor.kind,
-    capabilities: daemon.ok ? [...config.installedCapabilities] : ['pull', 'busy'],
-    detail: daemon.ok
+    capabilities: managed ? [...config.installedCapabilities] : ['pull', 'busy'],
+    detail: managed
       ? config.installedDetail
-      : 'Global hooks are installed, but the managed app-server daemon is not ready.',
+      : 'Plain Codex has pull delivery only; launch with `concord adapters codex --` for idle messaging.',
   };
 }
 
@@ -744,12 +744,6 @@ export function installAdapter(
     case 'codex': {
       installCodexMcpConfig(env);
       installCodexHooks(env);
-      const version = versionTuple(run(executable, ['--version'], env).output);
-      if (version !== undefined && atLeast(version, HARNESS_CONFIGS.codex.minimumVersion)) {
-        run(executable, ['app-server', 'daemon', 'bootstrap'], env);
-        run(executable, ['app-server', 'daemon', 'start'], env);
-        run(executable, ['app-server', 'daemon', 'enable-remote-control'], env);
-      }
       return;
     }
     case 'grok': {

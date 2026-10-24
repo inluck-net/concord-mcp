@@ -40,9 +40,9 @@ describe('concord setup in a clean sandbox', () => {
     expect(existsSync(join(root, 'scripts', 'watch-inbox.sh'))).toBe(true);
   });
 
-  it('starts the Codex app-server daemon and installs the Grok plugin', () => {
+  it('keeps Codex daemon control off and installs the Grok plugin', () => {
     const calls = sandbox.shimCalls();
-    expect(calls).toContain('codex app-server daemon start');
+    expect(calls.some((call) => call.startsWith('codex app-server daemon '))).toBe(false);
     expect(calls.some((call) => call.startsWith('grok plugin install '))).toBe(true);
   });
 

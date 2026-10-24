@@ -18,6 +18,7 @@ const userConfigSchema = z
     globalMode: z.boolean().optional(),
     globalRegistrations: z.array(z.string()).optional(),
     autoAdapters: z.boolean().optional(),
+    globalInstructions: z.enum(['workflow', 'messaging']).optional(),
   })
   .loose();
 /** The whole file as JSON, so settings this version does not know survive a write. */
@@ -31,6 +32,8 @@ export interface UserConfig {
   readonly globalRegistrations?: readonly string[];
   /** Install or repair a harness's adapter when a session finds it missing; undefined until asked. */
   readonly autoAdapters?: boolean;
+  /** Which built-in user-level Concord instructions global mode installs. */
+  readonly globalInstructions?: 'workflow' | 'messaging';
 }
 
 /** `~/.concord/`, home to the machine-wide store and the user's settings. */
@@ -60,6 +63,9 @@ export function readUserConfig(env: NodeJS.ProcessEnv): UserConfig {
         ? {}
         : { globalRegistrations: parsed.globalRegistrations }),
       ...(parsed.autoAdapters === undefined ? {} : { autoAdapters: parsed.autoAdapters }),
+      ...(parsed.globalInstructions === undefined
+        ? {}
+        : { globalInstructions: parsed.globalInstructions }),
     };
   } catch {
     return {};
