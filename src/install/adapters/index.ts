@@ -748,7 +748,6 @@ export function installAdapter(
       if (version !== undefined && atLeast(version, HARNESS_CONFIGS.codex.minimumVersion)) {
         run(executable, ['app-server', 'daemon', 'bootstrap'], env);
         run(executable, ['app-server', 'daemon', 'start'], env);
-        run(executable, ['app-server', 'daemon', 'enable-remote-control'], env);
       }
       return;
     }

@@ -18,6 +18,26 @@ import {
 const LASTING = (): boolean => false;
 
 describe('global harness adapters', () => {
+  it('does not enable Codex remote control during adapter install', () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-codex-adapter-home-'));
+    const bin = join(home, 'bin');
+    mkdirSync(bin);
+    writeFakeCommand(
+      bin,
+      'codex',
+      `import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(join(home, 'codex-calls'))}, process.argv.slice(2).join(' ') + '\\n');
+if (process.argv.includes('--version')) console.log('codex-cli 0.164.0');
+`,
+    );
+
+    installGlobalAdapters(import.meta.url, { HOME: home, CODEX_HOME: join(home, '.codex'), PATH: bin });
+
+    const calls = readFileSync(join(home, 'codex-calls'), 'utf8');
+    expect(calls).toContain('app-server daemon start');
+    expect(calls).not.toContain('enable-remote-control');
+  });
+
   it('installs every detected file-based adapter independently', () => {
     const home = mkdtempSync(join(tmpdir(), 'concord-adapters-home-'));
     const bin = join(home, 'bin');
