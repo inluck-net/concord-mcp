@@ -31,11 +31,30 @@ if (process.argv.includes('--version')) console.log('codex-cli 0.164.0');
 `,
     );
 
-    installGlobalAdapters(import.meta.url, { HOME: home, CODEX_HOME: join(home, '.codex'), PATH: bin });
+    installGlobalAdapters(import.meta.url, {
+      HOME: home,
+      CODEX_HOME: join(home, '.codex'),
+      PATH: bin,
+    });
 
     const calls = readFileSync(join(home, 'codex-calls'), 'utf8');
-    expect(calls).toContain('app-server daemon start');
+    expect(calls).toContain('--version');
+    expect(calls).not.toContain('app-server daemon');
     expect(calls).not.toContain('enable-remote-control');
+  });
+
+  it('does not advertise idle Codex delivery for plain Codex sessions', () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-codex-status-home-'));
+    const bin = join(home, 'bin');
+    mkdirSync(bin);
+    writeFakeVersion(bin, 'codex', 'codex-cli 0.164.0');
+
+    const codex = statusGlobalAdapters({ HOME: home, PATH: bin }).find(
+      (entry) => entry.harness === 'codex',
+    );
+
+    expect(codex?.capabilities).toEqual(['pull', 'busy']);
+    expect(codex?.detail).toContain('concord adapters codex');
   });
 
   it('installs every detected file-based adapter independently', () => {
