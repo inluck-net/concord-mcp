@@ -76,6 +76,23 @@ describe('upsertCodexMcpServer', () => {
     expect(out).toContain('key = 1');
   });
 
+  it('keeps user settings inside the Concord MCP table when setup is rerun', () => {
+    const existing = [
+      '[mcp_servers.concord]',
+      'command = "old-binary"',
+      'default_tools_approval_mode = "approve"',
+      'startup_timeout_sec = 30',
+      '',
+    ].join('\n');
+
+    const out = upsertCodexMcpServer(existing);
+
+    expect(out).toContain(`command = "${CONCORD_SERVER_COMMAND}"`);
+    expect(out).toContain('default_tools_approval_mode = "approve"');
+    expect(out).toContain('startup_timeout_sec = 30');
+    expect(upsertCodexMcpServer(out)).toBe(out);
+  });
+
   it('keeps a nested concord subtable, which is a table in its own right', () => {
     const existing = [
       '[mcp_servers.concord]',

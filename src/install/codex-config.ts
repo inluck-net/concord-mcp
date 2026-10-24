@@ -63,9 +63,18 @@ export function upsertCodexMcpServer(existing: string | undefined): string {
     }
   }
 
-  const head = withTrailingBlankLine(lines.slice(0, start));
-  const tail = lines.slice(end).join('\n');
-  return tail === '' ? `${head}${section}` : `${head}${section}\n${tail}`;
+  if (found !== -1) {
+    const updated = [...lines];
+    const commandIndex = updated.findIndex(
+      (line, index) => index > start && index < end && /^\s*command\s*=/u.test(line),
+    );
+    if (commandIndex === -1) updated.splice(start + 1, 0, `command = "${CONCORD_SERVER_COMMAND}"`);
+    else updated[commandIndex] = `command = "${CONCORD_SERVER_COMMAND}"`;
+    return updated.join('\n');
+  }
+
+  const head = withTrailingBlankLine(lines);
+  return `${head}${section}`;
 }
 
 const HOOKS_BEGIN = '# >>> concord hooks >>>';
