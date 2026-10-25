@@ -409,6 +409,7 @@ const SESSION_START = JSON.stringify({
   cwd: '/repo',
   source: 'startup',
 });
+const SENDER = 'claude-code:alpha';
 
 /** A workspace to register into, and an env no other test can pollute. */
 function workspace(): { repo: string; env: NodeJS.ProcessEnv } {
@@ -640,6 +641,51 @@ describe('SessionStart host handoff', () => {
     });
     expect(detach).not.toHaveBeenCalled();
     expect(reports.join('\n')).toMatch(/idle messages cannot wake/iu);
+  });
+
+  it('leaves the inbox usable when Windows idle wake is unavailable', async () => {
+    const { repo, env } = workspace();
+    const context = openContext(repo, env);
+    context.repos.agents.upsert({
+      agentId: SENDER,
+      kind: 'claude-code',
+      owner: null,
+      model: null,
+      pid: null,
+      cwd: null,
+      worktree: null,
+      branch: null,
+      summary: null,
+      status: 'active',
+    });
+
+    const result = await registerSession({
+      cwd: repo,
+      env,
+      agent: undefined,
+      provider: 'codex',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: () => undefined,
+      report: () => undefined,
+    });
+
+    // The limitation is about idle wake only: the session is registered and
+    // its messages queue for it as usual.
+    expect(result.host?.kind).toBe('idle-wake-limited');
+    const codexAgent = agentIdForSession('codex', THREAD);
+    const sent = handleSendAgentMessage(context.repos, {
+      operation: 'prompt',
+      agentId: SENDER,
+      toAgentId: codexAgent,
+      content: 'for your next turn',
+      idempotencyKey: 'local-mode-1',
+    });
+    expect(sent.delivery).toBe('queued_pull');
+
+    const drained = drainInbox(context.repos, codexAgent, 'codex');
+    expect(drained.map((message) => message.messageId)).toEqual([sent.message.messageId]);
+    expect(context.repos.agentMessages.get(sent.message.messageId)?.status).toBe('delivered');
   });
 
   it('keeps the detached host path on macOS and Linux', async () => {

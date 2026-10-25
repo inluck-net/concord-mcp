@@ -43,10 +43,28 @@ import {
 } from './copilot-adapter.js';
 import { cloudAccess } from './cloud-inbox.js';
 
-async function hostCodex(agentId: string, threadId: string): Promise<void> {
-  const context = openContext(process.cwd());
+export interface HostCodexOptions {
+  /** The workspace this host serves. */
+  readonly cwd: string;
+  /** The app-server this host drives. Defaults to the managed one in the environment. */
+  readonly client?: CodexDaemonClient;
+  /** Where this host's relay listens. Defaults to the workspace's runtime path. */
+  readonly relayAddress?: string;
+}
+
+/**
+ * Drive one Codex thread as its session host: connect to the app-server, relay
+ * messages into the thread, and record read receipts. Called by the launcher
+ * for a host it owns, never by the SessionStart hook that asked for one.
+ */
+export async function hostCodex(
+  agentId: string,
+  threadId: string,
+  options: HostCodexOptions = { cwd: process.cwd() },
+): Promise<void> {
+  const context = openContext(options.cwd);
   ensureAgentRegistered(context.repos, { agentId, kind: 'codex' }, context.repoRoot);
-  const client = new CodexDaemonClient();
+  const client = options.client ?? new CodexDaemonClient();
   // Read receipts: the model answered, or the turn completed, with a pushed message as input.
   const session = sessionKey(threadId);
   const reads = new CodexReadTracker(threadId, (messageIds, evidence) => {
@@ -73,7 +91,7 @@ async function hostCodex(agentId: string, threadId: string): Promise<void> {
   const relay = await startAgentRelay({
     repos: context.repos,
     agentId,
-    address: relayAddress(context.concordPath, agentId),
+    address: options.relayAddress ?? relayAddress(context.concordPath, agentId),
     adapter,
     pullFallback: true,
     session,

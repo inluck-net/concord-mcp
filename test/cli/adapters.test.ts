@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   codexManagedEnvironment,
   codexManagedLaunchContext,
+  hostCodex,
   keepCodexHostAlive,
 } from '../../src/cli/commands/adapters.js';
+import { registerSession } from '../../src/cli/commands/inbox.js';
 import {
   codexHostStartArgs,
   hostControlEnvironment,
@@ -14,7 +19,19 @@ import {
   type HostControl,
   type HostStartRequest,
 } from '../../src/cli/codex-host-control.js';
+import { openContext } from '../../src/cli/context.js';
+import type { Repositories } from '../../src/db/index.js';
+import { toReceipt } from '../../src/domain/receipts.js';
+import { agentIdForSession } from '../../src/domain/identity.js';
+import { CodexDaemonClient } from '../../src/relay/codex-client.js';
+import { SocketAgentMessageDispatcher } from '../../src/relay/socket-dispatcher.js';
 import { spawnCommand } from '../../src/install/spawn-command.js';
+import {
+  endpointPromptable,
+  handleSendAgentMessage,
+  handleSendAgentMessageWithDelivery,
+} from '../../src/tools/agent-messages.js';
+import { writeFakeCommand } from '../helpers/fake-command.js';
 
 describe('Codex managed launcher', () => {
   it('passes launcher arguments through to the child process', async () => {
@@ -374,5 +391,328 @@ describe('Codex host-start control', () => {
       requestHostStart({ location, capability }, { agentId: AGENT, threadId: THREAD }),
     ).resolves.toEqual({ status: 'unavailable', reason: 'no reachable managed launcher' });
     expect(started).toHaveLength(0);
+  });
+});
+
+const SESSION_START = JSON.stringify({ session_id: THREAD, cwd: '/repo', source: 'startup' });
+const SENDER = 'claude-code:alpha';
+
+/**
+ * A fake Codex app-server: the JSONL protocol `codex app-server proxy` speaks,
+ * which is what `CodexDaemonClient` drives. It takes a `turn/start`, then
+ * reports the pushed message as that turn's input and the turn as completed —
+ * the two pieces of evidence a read receipt is made of.
+ */
+function fakeAppServerScript(): string {
+  return `import { createInterface } from 'node:readline';
+
+const lines = createInterface({ input: process.stdin });
+lines.on('line', (line) => {
+  let frame;
+  try {
+    frame = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (typeof frame.method !== 'string' || frame.id === undefined) return;
+  const params = frame.params ?? {};
+  if (frame.method !== 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: frame.id, result: {} }) + '\\n');
+    return;
+  }
+  const text = (params.input ?? []).map((part) => part.text ?? '').join('\\n');
+  process.stdout.write(JSON.stringify({ id: frame.id, result: { turnId: 'turn-1' } }) + '\\n');
+  process.stdout.write(
+    JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: params.threadId,
+        turnId: 'turn-1',
+        item: {
+          type: 'userMessage',
+          clientId: params.clientUserMessageId ?? null,
+          content: [{ type: 'text', text }],
+        },
+      },
+    }) + '\\n',
+  );
+  process.stdout.write(
+    JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: params.threadId, turn: { id: 'turn-1', status: 'completed' } },
+    }) + '\\n',
+  );
+});
+`;
+}
+
+function eventually(check: () => boolean, timeoutMs = 5_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = (): void => {
+      if (check()) {
+        resolve();
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error('Condition was not met in time.'));
+        return;
+      }
+      setTimeout(poll, 25);
+    };
+    poll();
+  });
+}
+
+/**
+ * Whether `agentId`'s host is up and taking messages. Registration leaves a
+ * pull endpoint behind first, so promptable alone says nothing about the host.
+ */
+function hostIsUp(repos: Repositories, agentId: string): boolean {
+  const endpoint = repos.agentEndpoints.getByAgent(agentId);
+  return endpoint?.transport === 'local-ipc' && endpointPromptable(endpoint);
+}
+
+describe('launcher-owned Codex host', () => {
+  it('takes an idle prompt and its reply receipt after SessionStart has returned', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-codex-idle-'));
+    const repo = join(home, 'project');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    const env: NodeJS.ProcessEnv = { HOME: home };
+    openContext(repo, env);
+    const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
+    const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
+
+    const started: HostStartRequest[] = [];
+    const clients: CodexDaemonClient[] = [];
+    const failures: unknown[] = [];
+    const hostings: Promise<void>[] = [];
+    const control = await startHostControl({
+      startHost: (request) => {
+        started.push(request);
+        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy']);
+        clients.push(client);
+        // What the launcher does: start the session host and own its lifetime.
+        hostings.push(
+          hostCodex(request.agentId, request.threadId, {
+            cwd: repo,
+            client,
+            relayAddress: join(tmpdir(), `concord-host-${String(clients.length)}.sock`),
+          }).catch((error: unknown) => {
+            failures.push(error);
+          }),
+        );
+      },
+      log: () => undefined,
+    });
+
+    try {
+      const codexAgent = agentIdForSession('codex', THREAD);
+      const registration = await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: () => undefined,
+        report: () => undefined,
+      });
+
+      // SessionStart is over before any host exists to talk to.
+      expect(registration.agentId).toBe(codexAgent);
+      expect(registration.host).toEqual({ kind: 'launcher-owned', status: 'started' });
+      expect(started).toEqual([{ agentId: codexAgent, threadId: THREAD }]);
+
+      const repos = openContext(repo, env).repos;
+      repos.agents.upsert({
+        agentId: SENDER,
+        kind: 'claude-code',
+        owner: null,
+        model: null,
+        pid: null,
+        cwd: null,
+        worktree: null,
+        branch: null,
+        summary: null,
+        status: 'active',
+      });
+      await eventually(() => hostIsUp(repos, codexAgent));
+
+      const sent = await handleSendAgentMessageWithDelivery(
+        repos,
+        {
+          operation: 'prompt',
+          agentId: SENDER,
+          toAgentId: codexAgent,
+          content: 'wake up and review the diff',
+          idempotencyKey: 'idle-1',
+        },
+        new SocketAgentMessageDispatcher(),
+      );
+
+      expect(sent.delivery).toBe('delivered');
+      expect(sent.immediateMode).toBe('inject');
+      const messageId = sent.message.messageId;
+
+      // The fake app-server recorded the turn; the host turned that into a read.
+      await eventually(() => repos.agentMessages.get(messageId)?.status === 'read');
+      const read = toReceipt(repos.agentMessages.get(messageId) ?? sent.message);
+      expect(read.ticks).toBe('read');
+      expect(read.read_at).not.toBeNull();
+
+      // The Codex session answers, and the sender's receipt shows it.
+      handleSendAgentMessage(repos, {
+        operation: 'reply',
+        agentId: codexAgent,
+        toAgentId: SENDER,
+        content: 'reviewed, no issues',
+        replyToMessageId: messageId,
+        idempotencyKey: 'reply-1',
+      });
+      const receipt = toReceipt(repos.agentMessages.get(messageId) ?? sent.message);
+      expect(receipt.status).toBe('replied');
+      expect(receipt.ticks).toBe('replied');
+      expect(receipt.replied_at).not.toBeNull();
+      expect(failures).toEqual([]);
+    } finally {
+      for (const client of clients) client.close();
+      await Promise.all(hostings);
+      await control.close();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('stops advertising delivery once the app-server it drives goes away', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-codex-shutdown-'));
+    const repo = join(home, 'project');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    const env: NodeJS.ProcessEnv = { HOME: home };
+    openContext(repo, env);
+    const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
+    const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
+
+    const started: HostStartRequest[] = [];
+    const clients: CodexDaemonClient[] = [];
+    const failures: unknown[] = [];
+    const hostings: Promise<void>[] = [];
+    const control = await startHostControl({
+      startHost: (request) => {
+        started.push(request);
+        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy']);
+        clients.push(client);
+        hostings.push(
+          hostCodex(request.agentId, request.threadId, {
+            cwd: repo,
+            client,
+            relayAddress: join(tmpdir(), `concord-host-${String(clients.length)}.sock`),
+          }).catch((error: unknown) => {
+            failures.push(error);
+          }),
+        );
+      },
+      log: () => undefined,
+    });
+
+    try {
+      const codexAgent = agentIdForSession('codex', THREAD);
+      await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: () => undefined,
+        report: () => undefined,
+      });
+
+      const repos = openContext(repo, env).repos;
+      repos.agents.upsert({
+        agentId: SENDER,
+        kind: 'claude-code',
+        owner: null,
+        model: null,
+        pid: null,
+        cwd: null,
+        worktree: null,
+        branch: null,
+        summary: null,
+        status: 'active',
+      });
+      await eventually(() => hostIsUp(repos, codexAgent));
+
+      // The app-server — the host's reason to live — goes away.
+      for (const client of clients) client.close();
+      await Promise.all(hostings);
+      await eventually(() => !endpointPromptable(repos.agentEndpoints.getByAgent(codexAgent)));
+
+      // A message sent afterwards is queued for the agent's next turn, not
+      // handed to a host that is no longer there to deliver it.
+      const sent = handleSendAgentMessage(repos, {
+        operation: 'prompt',
+        agentId: SENDER,
+        toAgentId: codexAgent,
+        content: 'anyone there?',
+        idempotencyKey: 'after-shutdown',
+      });
+      expect(sent.delivery).toBe('queued_pull');
+      expect(failures).toEqual([]);
+    } finally {
+      for (const client of clients) client.close();
+      await Promise.all(hostings);
+      await control.close();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('starts one host for a duplicated SessionStart, not two', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'concord-codex-dup-'));
+    const repo = join(home, 'project');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    const env: NodeJS.ProcessEnv = { HOME: home };
+    openContext(repo, env);
+
+    const started: HostStartRequest[] = [];
+    const control = await startHostControl({
+      // Records only: with no host running, neither registration can decide it
+      // is already hosted and both must go through the launcher.
+      startHost: (request) => {
+        started.push(request);
+      },
+      log: () => undefined,
+    });
+
+    try {
+      const first = await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: () => undefined,
+        report: () => undefined,
+      });
+      const second = await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: () => undefined,
+        report: () => undefined,
+      });
+
+      expect(started).toHaveLength(1);
+      expect(first.host).toEqual({ kind: 'launcher-owned', status: 'started' });
+      expect(second.host).toEqual({ kind: 'launcher-owned', status: 'already-running' });
+    } finally {
+      await control.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
