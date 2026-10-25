@@ -81,7 +81,33 @@ function stopOnSignal(hub: HubServer): Promise<void> {
   });
 }
 
-export function registerHubCommand(program: Command): void {
+/** Where the command writes, and how it stops: the process's own, or a test's. */
+export interface HubCommandDeps {
+  readonly env: NodeJS.ProcessEnv;
+  /** Command output and request log lines, one per line. */
+  readonly write: (line: string) => void;
+  /** The command could not start: report it and end with a failing exit. */
+  readonly fail: (message: string) => void;
+  /** Keeps `hub serve` serving until the process is asked to stop. */
+  readonly waitForStop: (hub: HubServer) => Promise<void>;
+}
+
+function liveDeps(): HubCommandDeps {
+  return {
+    env: process.env,
+    write: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
+    fail: (message) => {
+      process.stderr.write(`${message}\n`);
+      process.exitCode = 1;
+    },
+    waitForStop: stopOnSignal,
+  };
+}
+
+export function registerHubCommand(program: Command, commandDeps?: HubCommandDeps): void {
+  const deps = commandDeps ?? liveDeps();
   const hub = program
     .command('hub')
     .description('Run a private Concord hub on this machine, for your own hosts');
@@ -96,14 +122,13 @@ export function registerHubCommand(program: Command): void {
       try {
         const running = await runHubServe(
           { port: options.port, db: options.db, keyFile: options.keyFile },
-          { env: process.env, log: (line) => process.stderr.write(`${line}\n`) },
+          { env: deps.env, log: deps.write },
         );
-        process.stderr.write(`Concord hub listening on ${running.url}\n`);
-        await stopOnSignal(running);
-        process.stderr.write('Concord hub stopped.\n');
+        deps.write(`Concord hub listening on ${running.url}`);
+        await deps.waitForStop(running);
+        deps.write('Concord hub stopped.');
       } catch (error) {
-        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-        process.exitCode = 1;
+        deps.fail(error instanceof Error ? error.message : String(error));
       }
     });
 }

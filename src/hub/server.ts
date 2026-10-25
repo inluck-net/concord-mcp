@@ -11,9 +11,17 @@ import {
   registerAgent,
 } from './agents.js';
 import { authenticate, type HubKeyFile, type HubKeyIdentity } from './keys.js';
+import { projectOf, resolveMcpActor, serveMcp } from './mcp.js';
 import { drainMessages, getReceipt, reportFailure, sendMessage } from './messages.js';
 import { hubMeta } from './meta.js';
-import { badRequest, forbidden, notFound, payloadTooLarge, type HubOutcome } from './outcome.js';
+import {
+  badRequest,
+  forbidden,
+  methodNotAllowed,
+  notFound,
+  payloadTooLarge,
+  type HubOutcome,
+} from './outcome.js';
 import type { HubStore, NewHubMachine } from './store.js';
 
 /**
@@ -259,6 +267,17 @@ async function route(
   const message = MESSAGE_ONE.exec(path);
   if (message !== null && method === 'GET') {
     return answer(response, method, path, getReceipt(store, machine, segment(message)));
+  }
+
+  // The five workflow tools, as the client's MCP transport speaks them.
+  if (path === '/mcp') {
+    if (method !== 'POST') return answer(response, method, path, methodNotAllowed());
+    const body = await readJsonBody(request);
+    if (!body.ok) return answer(response, method, path, body.outcome);
+    const actor = resolveMcpActor(store, machine, body.value);
+    if ('status' in actor) return answer(response, method, path, actor);
+    await serveMcp(store, projectOf(request), request, response, body.value, actor.identity);
+    return { method, path, status: response.statusCode };
   }
 
   return answer(response, method, path, notFound());

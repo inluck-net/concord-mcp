@@ -28,6 +28,10 @@ export function notFound(error = 'not found'): HubOutcome {
   return { status: 404, body: { error } };
 }
 
+export function methodNotAllowed(): HubOutcome {
+  return { status: 405, body: { error: 'method not allowed' } };
+}
+
 export function conflict(error: string): HubOutcome {
   return { status: 409, body: { error } };
 }

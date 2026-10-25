@@ -1,4 +1,5 @@
 import { REQUIRED_CAPABILITIES, SUPPORTED_API_VERSION, type CloudMeta } from '../cloud/client.js';
+import { PUBLIC_WORKFLOW_TOOLS } from '../tools/workflow.js';
 
 /**
  * `GET /v1/meta` in the shape `fetchMeta` parses: the hub speaks the API
@@ -6,14 +7,8 @@ import { REQUIRED_CAPABILITIES, SUPPORTED_API_VERSION, type CloudMeta } from '..
  * and its `/mcp` serves exactly the five workflow tools.
  */
 
-/** The workflow tools the hub serves over `/mcp`. */
-export const HUB_MCP_TOOLS = [
-  'start_work',
-  'inspect_work',
-  'update_work',
-  'transfer_work',
-  'finish_work',
-] as const;
+/** The workflow tools the hub serves over `/mcp`, as the local server registers them. */
+export const HUB_MCP_TOOLS: readonly string[] = PUBLIC_WORKFLOW_TOOLS;
 
 export function hubMeta(): CloudMeta {
   return {

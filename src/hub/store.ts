@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
   createRepositories,
   openDatabase,
+  LOCAL_PROJECT,
   type AgentRepository,
   type ConcordDatabase,
   type Repositories,
@@ -135,8 +136,10 @@ export interface HubDrainRepository {
 
 export interface HubStore {
   readonly db: ConcordDatabase;
-  /** The shared Concord repositories: messages and workflow state live here. */
+  /** The shared Concord repositories for the hub's default project scope. */
   readonly repos: Repositories;
+  /** Repositories scoped to one project, as a request names it; created once. */
+  reposFor(project: string): Repositories;
   readonly machines: HubMachineRepository;
   readonly agents: HubAgentRepository;
   readonly drains: HubDrainRepository;
@@ -384,11 +387,20 @@ export function createHubDrainRepository(db: ConcordDatabase): HubDrainRepositor
 export function openHubStore(filename: string): HubStore {
   const db = openDatabase(filename);
   db.exec(HUB_SCHEMA);
-  const repos = createRepositories(db);
+  const scopes = new Map<string, Repositories>();
+  const reposFor = (project: string): Repositories => {
+    const open = scopes.get(project);
+    if (open !== undefined) return open;
+    const created = createRepositories(db, project);
+    scopes.set(project, created);
+    return created;
+  };
+  const repos = reposFor(LOCAL_PROJECT);
   let closed = false;
   return {
     db,
     repos,
+    reposFor,
     machines: createHubMachineRepository(db),
     agents: createHubAgentRepository(db, repos.agents),
     drains: createHubDrainRepository(db),
