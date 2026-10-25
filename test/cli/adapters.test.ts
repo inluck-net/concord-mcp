@@ -490,7 +490,7 @@ describe('launcher-owned Codex host', () => {
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
-        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy']);
+        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy'], '');
         clients.push(client);
         // What the launcher does: start the session host and own its lifetime.
         hostings.push(
@@ -600,7 +600,7 @@ describe('launcher-owned Codex host', () => {
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
-        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy']);
+        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy'], '');
         clients.push(client);
         hostings.push(
           hostCodex(request.agentId, request.threadId, {
