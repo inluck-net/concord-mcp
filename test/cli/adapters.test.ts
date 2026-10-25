@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,7 +31,6 @@ import {
   handleSendAgentMessage,
   handleSendAgentMessageWithDelivery,
 } from '../../src/tools/agent-messages.js';
-import { writeFakeCommand } from '../helpers/fake-command.js';
 
 describe('Codex managed launcher', () => {
   it('passes launcher arguments through to the child process', async () => {
@@ -481,7 +480,8 @@ describe('launcher-owned Codex host', () => {
     const env: NodeJS.ProcessEnv = { HOME: home };
     openContext(repo, env).repos.db.close();
     const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
-    const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
+    const fakeCodex = join(bin, 'fake-codex.mjs');
+    writeFileSync(fakeCodex, fakeAppServerScript());
 
     const started: HostStartRequest[] = [];
     const clients: CodexDaemonClient[] = [];
@@ -491,7 +491,7 @@ describe('launcher-owned Codex host', () => {
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
-        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy'], '');
+        const client = new CodexDaemonClient(process.execPath, [fakeCodex], '');
         clients.push(client);
         // What the launcher does: start the session host and own its lifetime.
         hostings.push(
@@ -594,7 +594,8 @@ describe('launcher-owned Codex host', () => {
     const env: NodeJS.ProcessEnv = { HOME: home };
     openContext(repo, env).repos.db.close();
     const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
-    const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
+    const fakeCodex = join(bin, 'fake-codex.mjs');
+    writeFileSync(fakeCodex, fakeAppServerScript());
 
     const started: HostStartRequest[] = [];
     const clients: CodexDaemonClient[] = [];
@@ -604,7 +605,7 @@ describe('launcher-owned Codex host', () => {
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
-        const client = new CodexDaemonClient(fakeCodex, ['app-server', 'proxy'], '');
+        const client = new CodexDaemonClient(process.execPath, [fakeCodex], '');
         clients.push(client);
         hostings.push(
           hostCodex(request.agentId, request.threadId, {
