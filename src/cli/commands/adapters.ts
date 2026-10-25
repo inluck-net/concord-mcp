@@ -48,8 +48,6 @@ export interface HostCodexOptions {
   readonly cwd: string;
   /** The app-server this host drives. Defaults to the managed one in the environment. */
   readonly client?: CodexDaemonClient;
-  /** Where this host's relay listens. Defaults to the workspace's runtime path. */
-  readonly relayAddress?: string;
 }
 
 /**
@@ -97,7 +95,7 @@ export async function hostCodex(
     const relay = await startAgentRelay({
       repos: context.repos,
       agentId,
-      address: options.relayAddress ?? relayAddress(context.concordPath, agentId),
+      address: relayAddress(context.concordPath, agentId),
       adapter,
       pullFallback: true,
       session,

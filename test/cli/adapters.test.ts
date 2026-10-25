@@ -498,7 +498,6 @@ describe('launcher-owned Codex host', () => {
           hostCodex(request.agentId, request.threadId, {
             cwd: repo,
             client,
-            relayAddress: join(tmpdir(), `concord-host-${String(clients.length)}.sock`),
           }).catch((error: unknown) => {
             failures.push(error);
           }),
@@ -611,7 +610,6 @@ describe('launcher-owned Codex host', () => {
           hostCodex(request.agentId, request.threadId, {
             cwd: repo,
             client,
-            relayAddress: join(tmpdir(), `concord-host-${String(clients.length)}.sock`),
           }).catch((error: unknown) => {
             failures.push(error);
           }),
