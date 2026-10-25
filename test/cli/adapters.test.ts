@@ -479,7 +479,7 @@ describe('launcher-owned Codex host', () => {
     const repo = join(home, 'project');
     mkdirSync(join(repo, '.git'), { recursive: true });
     const env: NodeJS.ProcessEnv = { HOME: home };
-    openContext(repo, env);
+    openContext(repo, env).repos.db.close();
     const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
     const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
 
@@ -487,6 +487,7 @@ describe('launcher-owned Codex host', () => {
     const clients: CodexDaemonClient[] = [];
     const failures: unknown[] = [];
     const hostings: Promise<void>[] = [];
+    let closeTestDb: (() => void) | undefined;
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
@@ -525,6 +526,7 @@ describe('launcher-owned Codex host', () => {
       expect(started).toEqual([{ agentId: codexAgent, threadId: THREAD }]);
 
       const repos = openContext(repo, env).repos;
+      closeTestDb = () => repos.db.close();
       repos.agents.upsert({
         agentId: SENDER,
         kind: 'claude-code',
@@ -579,6 +581,7 @@ describe('launcher-owned Codex host', () => {
       for (const client of clients) client.close();
       await Promise.all(hostings);
       await control.close();
+      closeTestDb?.();
       rmSync(home, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
     }
@@ -589,7 +592,7 @@ describe('launcher-owned Codex host', () => {
     const repo = join(home, 'project');
     mkdirSync(join(repo, '.git'), { recursive: true });
     const env: NodeJS.ProcessEnv = { HOME: home };
-    openContext(repo, env);
+    openContext(repo, env).repos.db.close();
     const bin = mkdtempSync(join(tmpdir(), 'concord-codex-bin-'));
     const fakeCodex = writeFakeCommand(bin, 'codex', fakeAppServerScript());
 
@@ -597,6 +600,7 @@ describe('launcher-owned Codex host', () => {
     const clients: CodexDaemonClient[] = [];
     const failures: unknown[] = [];
     const hostings: Promise<void>[] = [];
+    let closeTestDb: (() => void) | undefined;
     const control = await startHostControl({
       startHost: (request) => {
         started.push(request);
@@ -629,6 +633,7 @@ describe('launcher-owned Codex host', () => {
       });
 
       const repos = openContext(repo, env).repos;
+      closeTestDb = () => repos.db.close();
       repos.agents.upsert({
         agentId: SENDER,
         kind: 'claude-code',
@@ -663,6 +668,7 @@ describe('launcher-owned Codex host', () => {
       for (const client of clients) client.close();
       await Promise.all(hostings);
       await control.close();
+      closeTestDb?.();
       rmSync(home, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
     }
@@ -673,7 +679,7 @@ describe('launcher-owned Codex host', () => {
     const repo = join(home, 'project');
     mkdirSync(join(repo, '.git'), { recursive: true });
     const env: NodeJS.ProcessEnv = { HOME: home };
-    openContext(repo, env);
+    openContext(repo, env).repos.db.close();
 
     const started: HostStartRequest[] = [];
     const control = await startHostControl({

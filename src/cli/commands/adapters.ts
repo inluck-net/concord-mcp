@@ -63,40 +63,50 @@ export async function hostCodex(
   options: HostCodexOptions = { cwd: process.cwd() },
 ): Promise<void> {
   const context = openContext(options.cwd);
-  ensureAgentRegistered(context.repos, { agentId, kind: 'codex' }, context.repoRoot);
   const client = options.client ?? new CodexDaemonClient();
-  // Read receipts: the model answered, or the turn completed, with a pushed message as input.
-  const session = sessionKey(threadId);
-  const reads = new CodexReadTracker(threadId, (messageIds, evidence) => {
-    try {
-      // The read may land before the sender has recorded the push as
-      // delivered; reading it proves delivery too, so record both.
-      context.repos.agentMessages.markReadByEvidence(agentId, messageIds, {
-        evidence,
-        via: 'adapter',
-        session,
-      });
-    } catch (error) {
-      process.stderr.write(
-        `Concord: could not record a read receipt: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
-  });
-  client.onNotification((notification) => {
-    reads.notify(notification);
-  });
-  await client.connect();
-  await client.resumeThread(threadId);
-  const adapter = new CodexAppServerAdapter(client, threadId, () => client.currentTurnId(), reads);
-  const relay = await startAgentRelay({
-    repos: context.repos,
-    agentId,
-    address: options.relayAddress ?? relayAddress(context.concordPath, agentId),
-    adapter,
-    pullFallback: true,
-    session,
-  });
-  await keepCodexHostAlive(client, relay);
+  try {
+    ensureAgentRegistered(context.repos, { agentId, kind: 'codex' }, context.repoRoot);
+    // Read receipts: the model answered, or the turn completed, with a pushed message as input.
+    const session = sessionKey(threadId);
+    const reads = new CodexReadTracker(threadId, (messageIds, evidence) => {
+      try {
+        // The read may land before the sender has recorded the push as
+        // delivered; reading it proves delivery too, so record both.
+        context.repos.agentMessages.markReadByEvidence(agentId, messageIds, {
+          evidence,
+          via: 'adapter',
+          session,
+        });
+      } catch (error) {
+        process.stderr.write(
+          `Concord: could not record a read receipt: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    });
+    client.onNotification((notification) => {
+      reads.notify(notification);
+    });
+    await client.connect();
+    await client.resumeThread(threadId);
+    const adapter = new CodexAppServerAdapter(
+      client,
+      threadId,
+      () => client.currentTurnId(),
+      reads,
+    );
+    const relay = await startAgentRelay({
+      repos: context.repos,
+      agentId,
+      address: options.relayAddress ?? relayAddress(context.concordPath, agentId),
+      adapter,
+      pullFallback: true,
+      session,
+    });
+    await keepCodexHostAlive(client, relay);
+  } finally {
+    client.close();
+    context.repos.db.close();
+  }
 }
 
 /** Keep a session relay alive only while its Codex app-server is reachable. */

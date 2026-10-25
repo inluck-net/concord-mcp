@@ -495,25 +495,30 @@ export async function registerSession(input: RegisterSessionInput): Promise<Regi
   }
 
   const context = openContext(input.cwd, input.env);
-  const existing =
-    input.provider === 'codex' ? context.repos.agentEndpoints.getByAgent(agentId) : undefined;
-  registerPullEndpoint(context.repos, agentId, input.provider);
-  // A SessionStart payload says whether this is a fresh session, which
-  // takes back what an earlier session was handed but never read.
-  if (input.hookPayload !== undefined) observeHookEvent(context.repos, agentId, input.hookPayload);
-  const alreadyHosted =
-    existing?.transport === 'local-ipc' &&
-    existing.status === 'connected' &&
-    (existing.expiresAt === null || Date.parse(existing.expiresAt) > Date.now());
-  const host =
-    input.provider === 'codex' && threadId !== undefined && !alreadyHosted
-      ? await handoff(context.repoRoot, threadId)
-      : null;
-  // Name the id. Clients whose session Concord can read resolve it on every
-  // tool call; clients that scrub their environment (Codex) cannot, and for
-  // those this line is the only place the agent learns who it is.
-  input.write(registeredLine(agentId, input.provider));
-  return { agentId, host };
+  try {
+    const existing =
+      input.provider === 'codex' ? context.repos.agentEndpoints.getByAgent(agentId) : undefined;
+    registerPullEndpoint(context.repos, agentId, input.provider);
+    // A SessionStart payload says whether this is a fresh session, which
+    // takes back what an earlier session was handed but never read.
+    if (input.hookPayload !== undefined)
+      observeHookEvent(context.repos, agentId, input.hookPayload);
+    const alreadyHosted =
+      existing?.transport === 'local-ipc' &&
+      existing.status === 'connected' &&
+      (existing.expiresAt === null || Date.parse(existing.expiresAt) > Date.now());
+    const host =
+      input.provider === 'codex' && threadId !== undefined && !alreadyHosted
+        ? await handoff(context.repoRoot, threadId)
+        : null;
+    // Name the id. Clients whose session Concord can read resolve it on every
+    // tool call; clients that scrub their environment (Codex) cannot, and for
+    // those this line is the only place the agent learns who it is.
+    input.write(registeredLine(agentId, input.provider));
+    return { agentId, host };
+  } finally {
+    context.repos.db.close();
+  }
 }
 
 export function registerInboxCommand(program: Command, telemetry?: TelemetryRecorder): void {
