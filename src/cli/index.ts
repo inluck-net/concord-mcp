@@ -14,6 +14,7 @@ import { registerDoctorCommand } from './commands/doctor.js';
 import { registerExportCommand } from './commands/export.js';
 import { registerHandoffCommand } from './commands/handoff.js';
 import { registerHookCommand } from './commands/hook.js';
+import { registerHubCommand } from './commands/hub-serve.js';
 import { registerInboxCommand } from './commands/inbox.js';
 import { registerMessagesCommand } from './commands/messages.js';
 import { registerReviewPacketCommand } from './commands/review-packet.js';
@@ -92,6 +93,7 @@ registerReviewPacketCommand(program);
 registerExportCommand(program);
 registerDoctorCommand(program);
 registerCloudCommand(program);
+registerHubCommand(program);
 
 try {
   await notifyIfUpdateAvailable(VERSION);
