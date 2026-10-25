@@ -77,13 +77,13 @@ export async function fetchMeta(apiUrl: string, fetchImpl: Fetch = fetch): Promi
   });
   if (!response.ok) {
     throw new Error(
-      `${apiUrl} answered ${String(response.status)} to /v1/meta; is it Concord Cloud?`,
+      `${apiUrl} answered ${String(response.status)} to /v1/meta; is it a Concord API?`,
     );
   }
   const raw: unknown = await response.json();
   const parsed = metaSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new Error(`${apiUrl} does not describe itself as Concord Cloud does.`);
+    throw new Error(`${apiUrl} does not describe itself as a Concord API does.`);
   }
   return parsed.data;
 }
