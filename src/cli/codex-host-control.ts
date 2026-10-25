@@ -54,6 +54,9 @@ export type HostStartOutcome =
   | { readonly status: 'already-running' }
   | { readonly status: 'unavailable'; readonly reason: string };
 
+/** What a client needs to reach a launcher's control: where it is, and the key. */
+export type HostControlRef = Pick<HostControl, 'location' | 'capability'>;
+
 export interface HostControl {
   /** `http://127.0.0.1:<port>` — loopback only, by construction. */
   readonly location: string;
@@ -86,7 +89,7 @@ export function codexHostStartArgs(request: HostStartRequest): readonly string[]
 
 /** The managed environment a launcher hands its app-server and TUI. */
 export function hostControlEnvironment(
-  control: Pick<HostControl, 'location' | 'capability'>,
+  control: HostControlRef,
   env: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   return {
@@ -94,6 +97,41 @@ export function hostControlEnvironment(
     [HOST_CONTROL_ENV]: control.location,
     [HOST_CONTROL_TOKEN_ENV]: control.capability,
   };
+}
+
+/** A loopback host:port, the only place a capability may be sent. */
+function isLoopbackLocation(location: string): boolean {
+  try {
+    const url = new URL(location);
+    return (
+      url.protocol === 'http:' &&
+      (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The launcher's control, when this process runs inside a managed Codex launch.
+ *
+ * Only a loopback location is honoured. The capability is a secret, and this
+ * would otherwise be a way for anything that can write the environment to have
+ * it posted to a host of its choosing.
+ */
+export function hostControlFromEnv(env: NodeJS.ProcessEnv): HostControlRef | undefined {
+  const location = env[HOST_CONTROL_ENV]?.trim();
+  const capability = env[HOST_CONTROL_TOKEN_ENV]?.trim();
+  if (
+    location === undefined ||
+    location === '' ||
+    capability === undefined ||
+    capability === '' ||
+    !isLoopbackLocation(location)
+  ) {
+    return undefined;
+  }
+  return { location, capability };
 }
 
 /** Constant-time capability check: compare digests so lengths never leak. */
@@ -288,7 +326,7 @@ export async function startHostControl(options: HostControlOptions): Promise<Hos
  * return promptly and say so, not hang on a child it cannot start.
  */
 export async function requestHostStart(
-  control: Pick<HostControl, 'location' | 'capability'>,
+  control: HostControlRef,
   request: HostStartRequest,
   fetchImpl: Fetch = (input, init) => fetch(input, init),
 ): Promise<HostStartOutcome> {
