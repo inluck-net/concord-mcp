@@ -9,12 +9,21 @@ import { z } from 'zod';
 import {
   registerHubClientCommand,
   runHubConnect,
+  runHubLink,
   runHubStatus,
+  runHubUnlink,
   type HubClientDeps,
 } from '../../src/cli/commands/hub-client.js';
 import { registerHubCommand, runHubServe } from '../../src/cli/commands/hub-serve.js';
 import { checkKey, REQUIRED_CAPABILITIES, type Fetch } from '../../src/cloud/client.js';
-import { credentialsPath, machinePath, readCredentials } from '../../src/cloud/settings.js';
+import {
+  credentialsPath,
+  machinePath,
+  readCredentials,
+  readLink,
+} from '../../src/cloud/settings.js';
+import { cloudTargetFor } from '../../src/cloud/target.js';
+import { createRepositories, openDatabase } from '../../src/db/index.js';
 import type { HubServer } from '../../src/hub/server.js';
 
 const KEY = 'hub-key-alpha-0123456789';
@@ -29,9 +38,20 @@ const machineList = z.object({
   machines: z.array(z.object({ machineKey: z.string(), name: z.string(), hostname: z.string() })),
 });
 
-describe('concord hub connect and status', () => {
+/** The message of a run that must refuse. */
+async function failureOf(run: Promise<unknown>): Promise<string> {
+  try {
+    await run;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('expected the command to refuse');
+}
+
+describe('concord hub client commands', () => {
   let dir: string;
   let home: string;
+  let repo: string;
   let hub: HubServer[];
   let deps: HubClientDeps;
   let minted: number;
@@ -51,18 +71,57 @@ describe('concord hub connect and status', () => {
     return running;
   }
 
+  /** The workspace's own local database, with one task in it. */
+  function writeLocalState(): string {
+    const dbPath = join(repo, '.concord', 'concord.db');
+    mkdirSync(join(repo, '.concord'), { recursive: true });
+    const local = openDatabase(dbPath);
+    createRepositories(local).tasks.create({
+      taskId: 'TASK-1',
+      title: 'local work',
+      owner: null,
+      agent: null,
+      branch: null,
+      worktree: null,
+      expectedFiles: [],
+      modules: [],
+      domains: [],
+      riskTags: [],
+      notes: null,
+      parentTaskId: null,
+      agentId: null,
+    });
+    local.close();
+    return dbPath;
+  }
+
+  function localTask(): string | undefined {
+    const reopened = openDatabase(join(repo, '.concord', 'concord.db'));
+    try {
+      return createRepositories(reopened).tasks.get('TASK-1')?.title;
+    } finally {
+      reopened.close();
+    }
+  }
+
+  const ORIGIN = () => 'git@github.com:Acme/App.git';
+
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'concord-hub-client-'));
     home = join(dir, 'home');
+    repo = join(dir, 'repo');
     mkdirSync(home);
+    mkdirSync(join(repo, '.git'), { recursive: true });
     hub = [];
     minted = 0;
     deps = {
       env: { HOME: home },
       fetch,
+      cwd: repo,
       readStdin: () => Promise.resolve(`${KEY}\n`),
       hostname: () => 'devbox',
       newMachineKey: () => `machine-${String(++minted)}`,
+      originRemote: ORIGIN,
     };
   });
 
@@ -233,7 +292,90 @@ describe('concord hub connect and status', () => {
     expect(unreachable).toContain('machine-1');
   });
 
-  it('hangs connect and status off the hub command group, beside serve', () => {
+  it('refuses to link a workspace that holds local state, and touches none of it', async () => {
+    const server = await startHub();
+    await runHubConnect({ url: server.url, keyStdin: true }, deps);
+    writeLocalState();
+
+    const message = await failureOf(runHubLink({ project: undefined, replaceLocal: false }, deps));
+    expect(message).toContain('holds local Concord state');
+    expect(message).toContain('--replace-local');
+    expect(message).toContain('without moving or deleting');
+    // Nothing moved, nothing linked.
+    expect(localTask()).toBe('local work');
+    expect(readLink(repo)).toBeUndefined();
+  });
+
+  it('links over local state when told to, and the link wins the routing', async () => {
+    const server = await startHub();
+    await runHubConnect({ url: server.url, keyStdin: true }, deps);
+    writeLocalState();
+
+    const out = await runHubLink({ project: undefined, replaceLocal: true }, deps);
+    expect(out).toContain('private hub');
+    expect(out).toContain('github.com/acme/app');
+    expect(out).toContain('local database is left in place');
+    expect(readLink(repo)).toEqual({
+      apiUrl: server.url,
+      projectKey: 'github.com/acme/app',
+    });
+
+    // Explicit link precedence: the link is what the target routing uses, ahead
+    // of the machine's signed-in default and ahead of local state.
+    expect(cloudTargetFor(repo, deps.env, ORIGIN)).toEqual({
+      apiUrl: server.url,
+      projectKey: 'github.com/acme/app',
+      source: 'link',
+    });
+    expect(localTask()).toBe('local work');
+  });
+
+  it('unlinks back to local mode, with the local database still readable and the hub untouched', async () => {
+    const server = await startHub();
+    await runHubConnect({ url: server.url, keyStdin: true }, deps);
+    writeLocalState();
+    await runHubLink({ project: undefined, replaceLocal: true }, deps);
+
+    const out = runHubUnlink(deps);
+    expect(out).toContain('works locally again');
+    expect(out).toContain('untouched');
+
+    // Local mode, not the machine's default: the workspace stays local even
+    // though this machine is still connected to the private hub.
+    expect(cloudTargetFor(repo, deps.env, ORIGIN)).toBeUndefined();
+    expect(localTask()).toBe('local work');
+    // The hub keeps its state: the machine's login and registration survive.
+    expect(readCredentials(deps.env)).toEqual({ apiUrl: server.url, apiKey: KEY });
+    expect(await checkKey(server.url, KEY)).toBe('ok');
+
+    // Unlinking again is a no-op, and a workspace that was never linked says so.
+    expect(runHubUnlink(deps)).toContain('already works locally');
+  });
+
+  it('reports a hub it cannot reach as retryable, and links nothing', async () => {
+    const server = await startHub();
+    await runHubConnect({ url: server.url, keyStdin: true }, deps);
+
+    const message = await failureOf(
+      runHubLink(
+        { project: undefined, replaceLocal: false },
+        { ...deps, fetch: () => Promise.reject(new TypeError('connection refused')) },
+      ),
+    );
+    expect(message).toContain('could not be reached');
+    expect(message).toContain('try again');
+    expect(message).not.toContain(KEY);
+    expect(readLink(repo)).toBeUndefined();
+  });
+
+  it('refuses to link before this machine is connected, in hub words', async () => {
+    const message = await failureOf(runHubLink({ project: undefined, replaceLocal: false }, deps));
+    expect(message).toContain('concord hub connect');
+    expect(message).not.toMatch(/Concord Cloud/iu);
+    expect(readLink(repo)).toBeUndefined();
+  });
+
+  it('hangs the workspace commands off the hub group and calls it a private hub', () => {
     const program = new Command();
     program.exitOverride();
     registerHubCommand(program, {
@@ -246,8 +388,19 @@ describe('concord hub connect and status', () => {
     const hub = program.commands.find((command) => command.name() === 'hub');
     expect(hub?.commands.map((command) => command.name()).sort()).toEqual([
       'connect',
+      'link',
       'serve',
       'status',
+      'unlink',
     ]);
+
+    // AC-2: help calls this a private hub, and never points at a Cloud account.
+    const help = [
+      hub?.description() ?? '',
+      ...(hub?.commands.map((command) => command.description()) ?? []),
+    ].join('\n');
+    expect(help).toContain('private hub');
+    expect(help).not.toMatch(/Concord Cloud/iu);
+    expect(help).not.toMatch(/account/iu);
   });
 });

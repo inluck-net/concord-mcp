@@ -65,8 +65,9 @@ export function cloudSessionFor(
   const machineKey = readMachineKey(env);
   if (credentials === undefined || machineKey === undefined) {
     throw new Error(
-      `${repoRoot} is linked to Concord Cloud, but this machine is not logged in. ` +
-        'Run `concord cloud login`, or `concord cloud unlink` to work locally.',
+      `${repoRoot} is linked to ${link.apiUrl}, but this machine is not logged in. ` +
+        `Run \`concord hub connect --url ${link.apiUrl} --key-stdin\` for a private hub ` +
+        '(or `concord cloud login` for Concord Cloud), or `concord hub unlink` to work locally.',
     );
   }
   if (!sameApi(credentials.apiUrl, link.apiUrl)) {
