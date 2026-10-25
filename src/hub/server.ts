@@ -2,8 +2,18 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { z } from 'zod';
 
-import { authenticate, type HubKeyFile } from './keys.js';
+import {
+  deleteReceiver,
+  getAgent,
+  listAgents,
+  putEndpoint,
+  putReceiver,
+  registerAgent,
+} from './agents.js';
+import { authenticate, type HubKeyFile, type HubKeyIdentity } from './keys.js';
+import { drainMessages, getReceipt, reportFailure, sendMessage } from './messages.js';
 import { hubMeta } from './meta.js';
+import { badRequest, forbidden, notFound, payloadTooLarge, type HubOutcome } from './outcome.js';
 import type { HubStore, NewHubMachine } from './store.js';
 
 /**
@@ -20,7 +30,7 @@ export const HUB_BIND_HOST = '127.0.0.1';
 /** One request's body: enough for a registration, never unbounded. */
 const MAX_BODY_BYTES = 64 * 1024;
 
-/** The registration body `registerMachine` sends; the client is the contract. */
+/** The machine registration body `registerMachine` sends; the client is the contract. */
 const registrationSchema = z.object({
   machineKey: z.string().min(1),
   name: z.string(),
@@ -115,7 +125,7 @@ function bearerOf(request: IncomingMessage): string | undefined {
 
 type BodyResult =
   | { readonly ok: true; readonly value: unknown }
-  | { readonly ok: false; readonly status: 400 | 413 };
+  | { readonly ok: false; readonly outcome: HubOutcome };
 
 async function readJsonBody(request: IncomingMessage): Promise<BodyResult> {
   const chunks: Buffer[] = [];
@@ -124,17 +134,17 @@ async function readJsonBody(request: IncomingMessage): Promise<BodyResult> {
     for await (const chunk of request) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       size += bytes.length;
-      if (size > MAX_BODY_BYTES) return { ok: false, status: 413 };
+      if (size > MAX_BODY_BYTES) return { ok: false, outcome: payloadTooLarge() };
       chunks.push(bytes);
     }
   } catch {
-    return { ok: false, status: 400 };
+    return { ok: false, outcome: badRequest('bad request') };
   }
   try {
     const raw: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     return { ok: true, value: raw };
   } catch {
-    return { ok: false, status: 400 };
+    return { ok: false, outcome: badRequest('bad request') };
   }
 }
 
@@ -143,6 +153,27 @@ interface Answered {
   readonly path: string;
   readonly status: number;
 }
+
+function answer(
+  response: ServerResponse,
+  method: string,
+  path: string,
+  outcome: HubOutcome,
+): Answered {
+  sendJson(response, outcome.status, outcome.body);
+  return { method, path, status: outcome.status };
+}
+
+/** The single path segment a route names its agent or message with. */
+function segment(match: RegExpExecArray): string {
+  return match[1] ?? '';
+}
+
+const AGENT_ENDPOINT = /^\/v1\/agents\/([^/]+)\/endpoint$/u;
+const AGENT_RECEIVER = /^\/v1\/agents\/([^/]+)\/endpoint\/receiver$/u;
+const AGENT_ONE = /^\/v1\/agents\/([^/]+)$/u;
+const MESSAGE_FAILURE = /^\/v1\/messages\/([^/]+)\/failure$/u;
+const MESSAGE_ONE = /^\/v1\/messages\/([^/]+)$/u;
 
 async function route(
   request: IncomingMessage,
@@ -154,52 +185,100 @@ async function route(
 
   // Public: the client reads it before it will trust a key.
   if (method === 'GET' && path === '/v1/meta') {
-    sendJson(response, 200, hubMeta());
-    return { method, path, status: 200 };
+    return answer(response, method, path, { status: 200, body: hubMeta() });
   }
 
   const bearer = bearerOf(request);
   const identity = bearer === undefined ? undefined : authenticate(options.keys, bearer);
   if (identity === undefined) {
-    sendJson(response, 401, { error: 'unauthorized' });
-    return { method, path, status: 401 };
+    return answer(response, method, path, { status: 401, body: { error: 'unauthorized' } });
   }
 
+  const machine = options.store.machines.findByKey(identity.fingerprint);
   if (method === 'GET' && path === '/v1/machines') {
-    const machine = options.store.machines.findByKey(identity.fingerprint);
-    sendJson(response, 200, { machines: machine === undefined ? [] : [machine] });
-    return { method, path, status: 200 };
+    return answer(response, method, path, {
+      status: 200,
+      body: { machines: machine === undefined ? [] : [machine] },
+    });
   }
-
   if (method === 'POST' && path === '/v1/machines') {
-    return register(request, response, options, identity, method, path);
+    return withBody(request, response, method, path, (body) =>
+      registerMachine(options.store, identity, body),
+    );
   }
 
-  sendJson(response, 404, { error: 'not found' });
-  return { method, path, status: 404 };
+  // Everything below is state: a key that has not registered its machine has
+  // none here, and the cloud refuses calls naming a machine it has not seen.
+  if (machine === undefined) {
+    return answer(response, method, path, forbidden('this key has not registered its machine'));
+  }
+  const store = options.store;
+
+  if (method === 'GET' && path === '/v1/agents') {
+    return answer(response, method, path, listAgents(store));
+  }
+  if (method === 'POST' && path === '/v1/agents') {
+    return withBody(request, response, method, path, (body) => registerAgent(store, machine, body));
+  }
+
+  const receiver = AGENT_RECEIVER.exec(path);
+  if (receiver !== null) {
+    const agentId = segment(receiver);
+    if (method === 'PUT') {
+      return withBody(request, response, method, path, (body) =>
+        putReceiver(store, machine, agentId, body),
+      );
+    }
+    if (method === 'DELETE') {
+      return answer(response, method, path, deleteReceiver(store, machine, agentId));
+    }
+  }
+  const endpoint = AGENT_ENDPOINT.exec(path);
+  if (endpoint !== null && method === 'PUT') {
+    return withBody(request, response, method, path, (body) =>
+      putEndpoint(store, machine, segment(endpoint), body),
+    );
+  }
+  const agent = AGENT_ONE.exec(path);
+  if (agent !== null && method === 'GET') {
+    return answer(response, method, path, getAgent(store, machine, segment(agent)));
+  }
+
+  if (method === 'POST' && path === '/v1/messages') {
+    return withBody(request, response, method, path, (body) => sendMessage(store, machine, body));
+  }
+  if (method === 'POST' && path === '/v1/messages/drain') {
+    return withBody(request, response, method, path, (body) => drainMessages(store, machine, body));
+  }
+  const failure = MESSAGE_FAILURE.exec(path);
+  if (failure !== null && method === 'POST') {
+    return withBody(request, response, method, path, (body) =>
+      reportFailure(store, machine, segment(failure), body),
+    );
+  }
+  const message = MESSAGE_ONE.exec(path);
+  if (message !== null && method === 'GET') {
+    return answer(response, method, path, getReceipt(store, machine, segment(message)));
+  }
+
+  return answer(response, method, path, notFound());
 }
 
-async function register(
+async function withBody(
   request: IncomingMessage,
   response: ServerResponse,
-  options: HubServerOptions,
-  identity: { readonly fingerprint: string; readonly name: string | undefined },
   method: string,
   path: string,
+  handle: (body: unknown) => HubOutcome | Promise<HubOutcome>,
 ): Promise<Answered> {
   const body = await readJsonBody(request);
-  if (!body.ok) {
-    const status = body.status;
-    sendJson(response, status, {
-      error: status === 413 ? 'payload too large' : 'bad request',
-    });
-    return { method, path, status };
-  }
-  const parsed = registrationSchema.safeParse(body.value);
-  if (!parsed.success) {
-    sendJson(response, 400, { error: 'bad request' });
-    return { method, path, status: 400 };
-  }
+  if (!body.ok) return answer(response, method, path, body.outcome);
+  return answer(response, method, path, await handle(body.value));
+}
+
+function registerMachine(store: HubStore, identity: HubKeyIdentity, body: unknown): HubOutcome {
+  const parsed = registrationSchema.safeParse(body);
+  if (!parsed.success) return badRequest('bad request');
   // The key file names the machine when it has a label; the body's own name is
   // the fallback. Either way the key decides which machine this may be.
   const machine: NewHubMachine = {
@@ -209,15 +288,12 @@ async function register(
     platform: parsed.data.platform,
     runtimeVersion: parsed.data.runtimeVersion,
   };
-  const registration = options.store.machines.register(machine, identity.fingerprint);
+  const registration = store.machines.register(machine, identity.fingerprint);
   if (registration.outcome === 'key-bound-elsewhere') {
-    sendJson(response, 403, { error: 'this key already identifies another machine' });
-    return { method, path, status: 403 };
+    return forbidden('this key already identifies another machine');
   }
   if (registration.outcome === 'machine-bound-elsewhere') {
-    sendJson(response, 403, { error: 'this machine is already identified by another key' });
-    return { method, path, status: 403 };
+    return forbidden('this machine is already identified by another key');
   }
-  sendJson(response, 200, { machine: registration.machine });
-  return { method, path, status: 200 };
+  return { status: 200, body: { machine: registration.machine } };
 }
