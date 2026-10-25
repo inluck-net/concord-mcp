@@ -27,6 +27,12 @@ import {
   uninstallGlobalAdapters,
 } from '../../install/adapters/index.js';
 import { openContext } from '../context.js';
+import { launchDetachedConcord } from '../detached-host.js';
+import {
+  codexHostStartArgs,
+  hostControlEnvironment,
+  startHostControl,
+} from '../codex-host-control.js';
 import { availablePort } from '../local-port.js';
 import { hostCodexInCloud } from './cloud-codex.js';
 import {
@@ -147,15 +153,30 @@ async function launchCodex(args: readonly string[], repoRoot: string): Promise<v
   const tokenFile = join(tokenDirectory, 'app-server.token');
   const token = randomBytes(32).toString('base64url');
   writeFileSync(tokenFile, `${token}\n`, { mode: 0o600, flag: 'wx' });
-  // The app-server, not the remote TUI, owns MCP child processes. Give both
-  // processes the URL so SessionStart's detached Concord host inherits it and
-  // connects back to this exact server instead of falling back to daemon proxy.
-  // Codex intentionally filters the environment of MCP children, so also run
-  // the complete managed tree from the resolved repository root.
-  const context = codexManagedLaunchContext(repoRoot, url, {
+  const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     CONCORD_CODEX_APP_SERVER_TOKEN_FILE: tokenFile,
+  };
+  // This launcher, not a SessionStart hook, owns the session's long-lived host:
+  // a child of the hook holds Codex at "Running hooks" for the host's whole
+  // life. The host is started from here with the same app-server coordinates
+  // the managed tree runs with, so it connects back to this exact server
+  // instead of falling back to daemon proxy.
+  const hostEnv = codexManagedEnvironment(url, baseEnv);
+  const control = await startHostControl({
+    startHost: (request) => {
+      launchDetachedConcord(repoRoot, codexHostStartArgs(request), hostEnv);
+    },
   });
+  // The app-server, not the remote TUI, owns MCP child processes, so both
+  // processes get the URL and this launch's host-start control location and
+  // capability. Codex intentionally filters the environment of MCP children,
+  // so also run the complete managed tree from the resolved repository root.
+  const context = codexManagedLaunchContext(
+    repoRoot,
+    url,
+    hostControlEnvironment(control, baseEnv),
+  );
   const server = spawnCommand(
     codex,
     ['app-server', '--listen', url, '--ws-auth', 'capability-token', '--ws-token-file', tokenFile],
@@ -185,6 +206,8 @@ async function launchCodex(args: readonly string[], repoRoot: string): Promise<v
     });
     if (code !== null && code !== 0) process.exitCode = code;
   } finally {
+    // The control is this launch's alone; it goes when the TUI does.
+    await control.close();
     server.kill();
     rmSync(tokenDirectory, { recursive: true, force: true });
   }
