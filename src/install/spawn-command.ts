@@ -3,7 +3,13 @@
  * without this build. npm installs harness CLIs on Windows as `.cmd` shims,
  * and Node refuses to spawn those without a shell.
  */
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type SpawnOptions,
+  type SpawnSyncReturns,
+} from 'node:child_process';
 import { join } from 'node:path';
 
 const BATCH_EXTENSION = /\.(?:cmd|bat)$/iu;
@@ -39,6 +45,23 @@ function commandInterpreter(env: NodeJS.ProcessEnv): string {
 export interface SpawnCommandOptions {
   env: NodeJS.ProcessEnv;
   timeout: number;
+}
+
+/** Spawn a resolved executable, including a Windows npm or Volta batch shim. */
+export function spawnCommand(
+  file: string,
+  args: readonly string[],
+  options: SpawnOptions & { env: NodeJS.ProcessEnv },
+): ChildProcess {
+  const common = { ...options, shell: false, windowsHide: true } as const;
+  if (process.platform !== 'win32' || !BATCH_EXTENSION.test(file)) {
+    return spawn(file, [...args], common);
+  }
+  return spawn(
+    commandInterpreter(options.env),
+    ['/d', '/v:off', '/s', '/c', batchCommandLine(file, args)],
+    { ...common, windowsVerbatimArguments: true },
+  );
 }
 
 /** Run a resolved executable without a shell, sending Windows batch shims through cmd.exe. */

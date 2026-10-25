@@ -1,5 +1,5 @@
 import type { Command } from '@commander-js/extra-typings';
-import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import { resolveRepoRoot } from '../../config/paths.js';
 import { readUserConfig } from '../../config/user-config.js';
 import { harnessNames } from '../../domain/harness-config.js';
 import { ensureHarnessAdapter } from '../../install/adapters/self-heal.js';
+import { spawnCommand } from '../../install/spawn-command.js';
 import { ensureAgentRegistered } from '../../tools/register-agent.js';
 import { relayAddress } from '../../relay/address.js';
 import { CodexAppServerAdapter } from '../../relay/adapters.js';
@@ -19,6 +20,7 @@ import { CodexReadTracker } from '../../relay/codex-read-tracker.js';
 import { sessionKey } from '../../domain/receipts.js';
 import { startAgentRelay, type RunningAgentRelay } from '../../relay/server.js';
 import {
+  executablePath,
   installGlobalAdapters,
   renderAdapterReport,
   statusGlobalAdapters,
@@ -100,9 +102,14 @@ export async function keepCodexHostAlive(
   }
 }
 
-async function waitForCodexServer(url: string, server: ReturnType<typeof spawn>): Promise<void> {
+async function waitForCodexServer(url: string, server: ChildProcess): Promise<void> {
   const healthUrl = url.replace(/^ws:/u, 'http:') + '/readyz';
+  let startupError: Error | undefined;
+  server.once('error', (error) => {
+    startupError = error;
+  });
   for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (startupError !== undefined) throw startupError;
     if (server.exitCode !== null) {
       throw new Error(
         `Codex app-server exited before it became ready (${String(server.exitCode)}).`,
@@ -132,6 +139,8 @@ export function codexManagedLaunchContext(
 }
 
 async function launchCodex(args: readonly string[], repoRoot: string): Promise<void> {
+  const codex = executablePath('codex', process.env);
+  if (codex === undefined) throw new Error('Codex CLI was not found on PATH.');
   const port = await availablePort();
   const url = `ws://127.0.0.1:${String(port)}`;
   const tokenDirectory = mkdtempSync(join(tmpdir(), 'concord-codex-'));
@@ -147,8 +156,8 @@ async function launchCodex(args: readonly string[], repoRoot: string): Promise<v
     ...process.env,
     CONCORD_CODEX_APP_SERVER_TOKEN_FILE: tokenFile,
   });
-  const server = spawn(
-    'codex',
+  const server = spawnCommand(
+    codex,
     ['app-server', '--listen', url, '--ws-auth', 'capability-token', '--ws-token-file', tokenFile],
     {
       ...context,
@@ -157,8 +166,8 @@ async function launchCodex(args: readonly string[], repoRoot: string): Promise<v
   );
   try {
     await waitForCodexServer(url, server);
-    const tui = spawn(
-      'codex',
+    const tui = spawnCommand(
+      codex,
       ['--remote', url, '--remote-auth-token-env', 'CONCORD_CODEX_REMOTE_AUTH_TOKEN', ...args],
       {
         ...context,
