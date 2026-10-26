@@ -20,9 +20,8 @@ import { concordDir, userHome } from '../config/paths.js';
  *   key. Per user, never in a repository: `.mcp.json` and friends are usually
  *   committed, and a key must not ride along.
  * - **Link** (`<repo>/.concord/cloud.json`) — this repository's own choice: to
- *   work through the cloud as a named project, or (`{ "local": true }`) to stay
- *   local. Without one, a signed-in machine works through the cloud by default;
- *   see `cloud/target.ts`.
+ *   work through a named API project, or (`{ "local": true }`) to stay local.
+ *   Cloud login defaults to remote routing; a private hub requires a link.
  */
 
 const oauthTokensSchema = z.object({
@@ -41,7 +40,7 @@ export type OAuthTokens = z.infer<typeof oauthTokensSchema>;
  * a request gets its bearer token from it.
  */
 const credentialsSchema = z.union([
-  z.object({ apiUrl: z.url(), apiKey: z.string().min(1) }),
+  z.object({ apiUrl: z.url(), apiKey: z.string().min(1), scope: z.literal('hub').optional() }),
   z.object({ apiUrl: z.url(), oauth: oauthTokensSchema }),
 ]);
 export type CloudCredentials = z.infer<typeof credentialsSchema>;

@@ -55,6 +55,10 @@ export function cloudTargetFor(
   const credentials = readCredentials(env);
   if (credentials === undefined || readMachineKey(env) === undefined) return undefined;
 
+  // Connecting a private hub authenticates this machine, but each workspace
+  // joins only through an explicit link. Cloud logins keep their default.
+  if ('scope' in credentials && credentials.scope === 'hub') return undefined;
+
   const projectKey = isRepository(repoRoot)
     ? repositoryProjectKey(repoRoot, originRemote)
     : hasExplicitRepoRoot(env)

@@ -170,20 +170,43 @@ async function drainOnce(
   return toDeliverables(messages);
 }
 
+/**
+ * A hub or cloud that cannot be reached, said as one clear line: the caller
+ * may repeat the request (a drain key replays its batch), and must never read
+ * silence as an empty inbox.
+ */
+function unreachable(error: unknown): Error {
+  return new Error(
+    `The Concord API could not be reached: ${error instanceof Error ? error.message : String(error)}. ` +
+      'It may be down, or unreachable from here; try again.',
+    { cause: error },
+  );
+}
+
+/** Whether this failure was the network rather than the API's answer. */
+function isOutage(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && error.name === 'TimeoutError');
+}
+
 /** Takes every message waiting for the session, as a hook does after a tool call. */
-export function drainFromCloud(
+export async function drainFromCloud(
   runtime: CloudRuntime,
   agentKey: string,
   provider: string,
 ): Promise<DeliverableMessage[]> {
-  return asCloudAgent(
-    runtime,
-    { agentKey, kind: provider },
-    (agent) => drainOnce(runtime, agent, agentKey, 0),
-    // Registered here because session start could not: advertise it too, as
-    // every local drain does.
-    (agent) => advertise(runtime, agent, agentKey, provider, false),
-  );
+  try {
+    return await asCloudAgent(
+      runtime,
+      { agentKey, kind: provider },
+      (agent) => drainOnce(runtime, agent, agentKey, 0),
+      // Registered here because session start could not: advertise it too, as
+      // every local drain does.
+      (agent) => advertise(runtime, agent, agentKey, provider, false),
+    );
+  } catch (error) {
+    if (isOutage(error)) throw unreachable(error);
+    throw error;
+  }
 }
 
 /**
