@@ -31,6 +31,12 @@ import { resolveAgentId, resolveInboxOwner } from '../agent-identity.js';
 import { resolveStore } from '../../workspaces/store.js';
 import { openContext } from '../context.js';
 import { launchDetachedConcord } from '../detached-host.js';
+import {
+  codexHostStartArgs,
+  hostControlFromEnv,
+  requestHostStart,
+  type HostStartRequest,
+} from '../codex-host-control.js';
 import { isSubagentHook, observeHookEvent, parseObservedHook } from './inbox-observe.js';
 import {
   cloudAccess,
@@ -262,15 +268,79 @@ export function workspaceExists(cwd: string, env: NodeJS.ProcessEnv = process.en
   }
 }
 
-function launchCodexAdapterHost(repoRoot: string, agentId: string, threadId: string): void {
-  launchDetachedConcord(repoRoot, [
-    'adapters',
-    'host-codex',
-    '--agent',
-    agentId,
-    '--thread',
-    threadId,
-  ]);
+/**
+ * Where this session's idle host ended up running.
+ *
+ * `idle-wake-limited` is the honest outcome on Windows without a reachable
+ * managed launcher: the session is registered and still exchanges messages on
+ * its own turns, but nothing will wake it while it sits idle.
+ */
+export type CodexHostHandoffResult =
+  | { readonly kind: 'launcher-owned'; readonly status: 'started' | 'already-running' }
+  | { readonly kind: 'detached' }
+  | { readonly kind: 'idle-wake-limited'; readonly reason: string };
+
+export interface CodexHostHandoff {
+  readonly repoRoot: string;
+  readonly agentId: string;
+  readonly threadId: string;
+  readonly env: NodeJS.ProcessEnv;
+  /** `process.platform`, so the Windows-only limitation is testable anywhere. */
+  readonly platform: string;
+  /** Stands in for the hook's own detached host start. */
+  readonly detach?: (request: HostStartRequest) => void;
+}
+
+/** What a session loses without a host owner, and the little it keeps. */
+function idleWakeLimitation(detail: string): string {
+  return (
+    `Concord: idle messages cannot wake this Codex session (${detail}). ` +
+    'They will reach it on its next turn. Start Codex with `concord adapters codex` ' +
+    'so its launcher can run the session host.'
+  );
+}
+
+/**
+ * Get one session's idle host running, without ever owning its lifetime.
+ *
+ * Under a managed launch the launcher already listens for this request and
+ * starts `host-codex` itself, outside this process. A hook that spawns the host
+ * instead leaves a long-lived child in SessionStart's process ancestry, and on
+ * Windows Codex holds the hook at "Running hooks" for exactly as long as that
+ * child lives. So with no reachable launcher on Windows there is no safe way to
+ * start one from here: say so and return, rather than reintroduce the stall.
+ * Elsewhere the detached host is the behaviour that already ships.
+ */
+export async function handOffCodexHost(
+  handoff: CodexHostHandoff,
+  report: (line: string) => void = (line) => {
+    process.stderr.write(`${line}\n`);
+  },
+): Promise<CodexHostHandoffResult> {
+  const request: HostStartRequest = { agentId: handoff.agentId, threadId: handoff.threadId };
+  const detach =
+    handoff.detach ??
+    ((toStart: HostStartRequest): void => {
+      launchDetachedConcord(handoff.repoRoot, codexHostStartArgs(toStart), handoff.env);
+    });
+  const control = hostControlFromEnv(handoff.env);
+  if (control !== undefined) {
+    const outcome = await requestHostStart(control, request);
+    if (outcome.status !== 'unavailable') return { kind: 'launcher-owned', status: outcome.status };
+    if (handoff.platform === 'win32') {
+      report(idleWakeLimitation(outcome.reason));
+      return { kind: 'idle-wake-limited', reason: outcome.reason };
+    }
+    detach(request);
+    return { kind: 'detached' };
+  }
+  if (handoff.platform === 'win32') {
+    const reason = 'no managed launcher is reachable for this session';
+    report(idleWakeLimitation(reason));
+    return { kind: 'idle-wake-limited', reason };
+  }
+  detach(request);
+  return { kind: 'detached' };
 }
 
 function recordDeliveredMessages(
@@ -339,8 +409,116 @@ function writeMonitorNudge(reason: string): void {
 }
 
 /** A cloud failure in a hook: said once on stderr, never failing the session's turn. */
-function reportCloudFailure(detail: string): void {
-  process.stderr.write(`Concord Cloud could not be reached: ${detail}\n`);
+function reportCloudFailure(
+  detail: string,
+  report: (line: string) => void = (line) => {
+    process.stderr.write(`${line}\n`);
+  },
+): void {
+  report(`Concord Cloud could not be reached: ${detail}`);
+}
+
+export interface RegisterSessionInput {
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly agent: string | undefined;
+  readonly provider: string;
+  /** A SessionStart payload, when this runs behind `--from-hook`. */
+  readonly hookPayload: string | undefined;
+  /** `process.platform`; only Windows gets the idle-wake limitation. */
+  readonly platform: string;
+  /** The identity line, on stdout. */
+  readonly write: (text: string) => void;
+  /** A hook's diagnostics, on stderr. */
+  readonly report: (line: string) => void;
+  /** Stands in for the hook's own detached host start. */
+  readonly detach?: (request: HostStartRequest) => void;
+}
+
+export interface RegisterSessionResult {
+  /** Null when this directory has nothing to register into. */
+  readonly agentId: string | null;
+  /** Where the Codex idle host went, when this session needs one. */
+  readonly host: CodexHostHandoffResult | null;
+}
+
+/**
+ * Advertise one session as able to receive messages, and place its idle host.
+ *
+ * Everything a SessionStart hook does lives here, so the hook itself only has
+ * to read its payload and print what this returns. It always returns promptly:
+ * a Codex host lives far longer than a hook may, and one that ran inside the
+ * hook would hold the hook open for its whole life.
+ */
+export async function registerSession(input: RegisterSessionInput): Promise<RegisterSessionResult> {
+  const access = cloudAccess(input.cwd, { timeoutMs: HOOK_TIMEOUT_MS }, input.env);
+  if (access.kind === 'local' && !workspaceExists(input.cwd, input.env)) {
+    return { agentId: null, host: null };
+  }
+  if (access.kind === 'unusable') {
+    reportCloudFailure(access.reason, input.report);
+    return { agentId: null, host: null };
+  }
+  const agentId = resolveAgentId(input.agent, input.env, {
+    kind: input.provider,
+    ...(input.hookPayload === undefined ? {} : { hookPayload: input.hookPayload }),
+  });
+  const threadId = input.hookPayload === undefined ? undefined : hookSessionId(input.hookPayload);
+  const handoff = async (repoRoot: string, id: string): Promise<CodexHostHandoffResult> =>
+    handOffCodexHost(
+      {
+        repoRoot,
+        agentId,
+        threadId: id,
+        env: input.env,
+        platform: input.platform,
+        ...(input.detach === undefined ? {} : { detach: input.detach }),
+      },
+      input.report,
+    );
+
+  if (access.kind === 'cloud') {
+    try {
+      await registerInCloud(access.runtime, agentId, input.provider, input.cwd);
+    } catch (error) {
+      reportCloudFailure(error instanceof Error ? error.message : String(error), input.report);
+      return { agentId: null, host: null };
+    }
+    // Codex is delivered to live by a host on this machine; start one
+    // unless one already holds this session's receiver.
+    const host =
+      input.provider === 'codex' && threadId !== undefined && !watching(access.runtime, agentId)
+        ? await handoff(access.runtime.repoRoot, threadId)
+        : null;
+    input.write(registeredLine(agentId, input.provider));
+    return { agentId, host };
+  }
+
+  const context = openContext(input.cwd, input.env);
+  try {
+    const existing =
+      input.provider === 'codex' ? context.repos.agentEndpoints.getByAgent(agentId) : undefined;
+    registerPullEndpoint(context.repos, agentId, input.provider);
+    // A SessionStart payload says whether this is a fresh session, which
+    // takes back what an earlier session was handed but never read.
+    if (input.hookPayload !== undefined)
+      observeHookEvent(context.repos, agentId, input.hookPayload);
+    const alreadyHosted =
+      existing?.transport === 'local-ipc' &&
+      existing.status === 'connected' &&
+      (existing.expiresAt === null || Date.parse(existing.expiresAt) > Date.now());
+    const host =
+      input.provider === 'codex' && threadId !== undefined && !alreadyHosted
+        ? await handoff(context.repoRoot, threadId)
+        : null;
+    // Name the id. Clients whose session Concord can read resolve it on every
+    // tool call; clients that scrub their environment (Codex) cannot, and for
+    // those this line is the only place the agent learns who it is.
+    input.write(registeredLine(agentId, input.provider));
+    return { agentId, host };
+  } finally {
+    context.repos.db.close();
+  }
 }
 
 export function registerInboxCommand(program: Command, telemetry?: TelemetryRecorder): void {
@@ -387,56 +565,21 @@ export function registerInboxCommand(program: Command, telemetry?: TelemetryReco
     .option('--provider <name>', 'Client the agent runs in', 'claude-code')
     .option('--from-hook', 'Read the session id from a hook payload on stdin (Codex)')
     .action(async (options) => {
-      const access = cloudAccess(process.cwd(), { timeoutMs: HOOK_TIMEOUT_MS });
-      if (access.kind === 'local' && !workspaceExists(process.cwd())) return;
-      if (access.kind === 'unusable') {
-        reportCloudFailure(access.reason);
-        return;
-      }
       const hookPayload = options.fromHook === true ? (readHookPayload() ?? '') : undefined;
-      const agentId = resolveAgentId(options.agent, process.env, {
-        kind: options.provider,
-        ...(hookPayload === undefined ? {} : { hookPayload }),
+      await registerSession({
+        cwd: process.cwd(),
+        env: process.env,
+        agent: options.agent,
+        provider: options.provider,
+        hookPayload,
+        platform: process.platform,
+        write: (text) => {
+          process.stdout.write(text);
+        },
+        report: (line) => {
+          process.stderr.write(`${line}\n`);
+        },
       });
-      if (access.kind === 'cloud') {
-        try {
-          await registerInCloud(access.runtime, agentId, options.provider, process.cwd());
-        } catch (error) {
-          reportCloudFailure(error instanceof Error ? error.message : String(error));
-          return;
-        }
-        // Codex is delivered to live by a host on this machine; start one
-        // unless one already holds this session's receiver.
-        const threadId = hookPayload === undefined ? undefined : hookSessionId(hookPayload);
-        if (
-          options.provider === 'codex' &&
-          threadId !== undefined &&
-          !watching(access.runtime, agentId)
-        ) {
-          launchCodexAdapterHost(access.runtime.repoRoot, agentId, threadId);
-        }
-        process.stdout.write(registeredLine(agentId, options.provider));
-        return;
-      }
-      const context = openContext(process.cwd());
-      const existing =
-        options.provider === 'codex' ? context.repos.agentEndpoints.getByAgent(agentId) : undefined;
-      registerPullEndpoint(context.repos, agentId, options.provider);
-      // A SessionStart payload says whether this is a fresh session, which
-      // takes back what an earlier session was handed but never read.
-      if (hookPayload !== undefined) observeHookEvent(context.repos, agentId, hookPayload);
-      const alreadyHosted =
-        existing?.transport === 'local-ipc' &&
-        existing.status === 'connected' &&
-        (existing.expiresAt === null || Date.parse(existing.expiresAt) > Date.now());
-      const threadId = hookPayload === undefined ? undefined : hookSessionId(hookPayload);
-      if (options.provider === 'codex' && threadId !== undefined && !alreadyHosted) {
-        launchCodexAdapterHost(context.repoRoot, agentId, threadId);
-      }
-      // Name the id. Clients whose session Concord can read resolve it on every
-      // tool call; clients that scrub their environment (Codex) cannot, and for
-      // those this line is the only place the agent learns who it is.
-      process.stdout.write(registeredLine(agentId, options.provider));
     });
 
   inbox

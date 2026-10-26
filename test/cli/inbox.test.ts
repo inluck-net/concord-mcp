@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,9 +19,16 @@ import {
   drainInbox,
   registeredLine,
   registerPullEndpoint,
+  registerSession,
   watchInbox,
   workspaceStatus,
 } from '../../src/cli/commands/inbox.js';
+import {
+  hostControlEnvironment,
+  startHostControl,
+  type HostStartRequest,
+} from '../../src/cli/codex-host-control.js';
+import { openContext } from '../../src/cli/context.js';
 import { effectiveEndpointCapabilities, monitorCapabilityFor } from '../../src/domain/delivery.js';
 import { agentIdForSession } from '../../src/domain/identity.js';
 import { endpointPromptable, handleSendAgentMessage } from '../../src/tools/agent-messages.js';
@@ -391,5 +399,345 @@ describe('registeredLine', () => {
 
   it('names no monitor for a harness without a monitor command', () => {
     expect(registeredLine('claude-code:4f2a91c7', 'claude-code')).not.toContain('inbox watch');
+  });
+});
+
+/** The Codex thread a SessionStart hook is handed, and the payload it comes in. */
+const THREAD = '019fd3d0-75d2-7211-b743-d770c8c76fc6';
+const SESSION_START = JSON.stringify({
+  session_id: THREAD,
+  cwd: '/repo',
+  source: 'startup',
+});
+const SENDER = 'claude-code:alpha';
+
+/** A workspace to register into, and an env no other test can pollute. */
+function workspace(): { repo: string; env: NodeJS.ProcessEnv } {
+  const home = mkdtempSync(join(tmpdir(), 'concord-codex-register-'));
+  const repo = join(home, 'project');
+  mkdirSync(join(repo, '.git'), { recursive: true });
+  const env: NodeJS.ProcessEnv = { HOME: home };
+  // `inbox register` is silent outside a workspace, so create one first.
+  openContext(repo, env);
+  return { repo, env };
+}
+
+/** A host that outlives the registration that asked for it, if all is well. */
+function longLivedHost(): { child: ChildProcess; exited: () => boolean } {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 50)'], { stdio: 'ignore' });
+  let seen = false;
+  child.once('exit', () => {
+    seen = true;
+  });
+  return { child, exited: () => seen };
+}
+
+const settle = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+describe('SessionStart host handoff', () => {
+  it('finishes registration while the launcher-owned host is still alive', async () => {
+    const { repo, env } = workspace();
+    const started: HostStartRequest[] = [];
+    const hosts: { child: ChildProcess; exited: () => boolean }[] = [];
+    const detach = vi.fn();
+    const control = await startHostControl({
+      startHost: (request) => {
+        started.push(request);
+        hosts.push(longLivedHost());
+      },
+      log: () => undefined,
+    });
+    try {
+      const out: string[] = [];
+      const result = await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: (text) => {
+          out.push(text);
+        },
+        report: (line) => {
+          out.push(`${line}\n`);
+        },
+        detach,
+      });
+
+      // The registration is over. The host it asked for is not.
+      await settle(100);
+
+      const expected = agentIdForSession('codex', THREAD);
+      expect(result.agentId).toBe(expected);
+      expect(out.join('')).toContain(expected);
+      expect(result.host).toEqual({ kind: 'launcher-owned', status: 'started' });
+      expect(started).toEqual([{ agentId: expected, threadId: THREAD }]);
+      expect(hosts[0]?.exited()).toBe(false);
+      expect(hosts[0]?.child.exitCode).toBeNull();
+      // The hook never spawned a host of its own: the launcher did.
+      expect(detach).not.toHaveBeenCalled();
+    } finally {
+      await control.close();
+      for (const host of hosts) host.child.kill();
+    }
+  });
+
+  it('prints the same session agent id the host is started for', async () => {
+    const { repo, env } = workspace();
+    const started: HostStartRequest[] = [];
+    const control = await startHostControl({
+      startHost: (request) => {
+        started.push(request);
+      },
+      log: () => undefined,
+    });
+    try {
+      const out: string[] = [];
+      await registerSession({
+        cwd: repo,
+        env: hostControlEnvironment(control, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: (text) => {
+          out.push(text);
+        },
+        report: () => undefined,
+      });
+
+      const expected = agentIdForSession('codex', THREAD);
+      const printed = out.join('');
+      expect(printed).toContain(`"${expected}"`);
+      expect(started.map((request) => request.agentId)).toEqual([expected]);
+    } finally {
+      await control.close();
+    }
+  });
+
+  it('reports an idle-wake limitation on Windows rather than detaching a host', async () => {
+    const { repo, env } = workspace();
+    const detach = vi.fn();
+    const reports: string[] = [];
+    const startedAt = Date.now();
+
+    const result = await registerSession({
+      cwd: repo,
+      env,
+      agent: undefined,
+      provider: 'codex',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: () => undefined,
+      report: (line) => {
+        reports.push(line);
+      },
+      detach,
+    });
+
+    // Promptly: no child to wait on, and none started.
+    expect(Date.now() - startedAt).toBeLessThan(1500);
+    expect(result.host).toEqual({
+      kind: 'idle-wake-limited',
+      reason: 'no managed launcher is reachable for this session',
+    });
+    expect(detach).not.toHaveBeenCalled();
+    const said = reports.join('\n');
+    expect(said).toMatch(/idle messages cannot wake/iu);
+    expect(said).toMatch(/next turn/iu);
+    expect(said).toMatch(/concord adapters codex/iu);
+  });
+
+  it('still prints the session agent id when idle wake is unavailable', async () => {
+    const { repo, env } = workspace();
+    const out: string[] = [];
+
+    const result = await registerSession({
+      cwd: repo,
+      env,
+      agent: undefined,
+      provider: 'codex',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: (text) => {
+        out.push(text);
+      },
+      report: () => undefined,
+    });
+
+    expect(result.agentId).toBe(agentIdForSession('codex', THREAD));
+    expect(out.join('')).toContain(agentIdForSession('codex', THREAD));
+  });
+
+  it('says the same for an invalid launcher capability, without waiting on it', async () => {
+    const { repo, env } = workspace();
+    const started: HostStartRequest[] = [];
+    const control = await startHostControl({
+      startHost: (request) => {
+        started.push(request);
+      },
+      log: () => undefined,
+    });
+    try {
+      const reports: string[] = [];
+      const detach = vi.fn();
+      const startedAt = Date.now();
+
+      const result = await registerSession({
+        cwd: repo,
+        // A launcher that will refuse this capability: the hook must not wait
+        // on a reply that is never coming.
+        env: hostControlEnvironment({ location: control.location, capability: 'wrong' }, env),
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform: 'win32',
+        write: () => undefined,
+        report: (line) => {
+          reports.push(line);
+        },
+        detach,
+      });
+
+      expect(Date.now() - startedAt).toBeLessThan(1500);
+      expect(result.host?.kind).toBe('idle-wake-limited');
+      expect(started).toHaveLength(0);
+      expect(detach).not.toHaveBeenCalled();
+      expect(reports.join('\n')).toMatch(/idle messages cannot wake/iu);
+    } finally {
+      await control.close();
+    }
+  });
+
+  it('says the same for a launcher that is gone, without waiting on it', async () => {
+    const { repo, env } = workspace();
+    const reports: string[] = [];
+    const detach = vi.fn();
+    const startedAt = Date.now();
+
+    const result = await registerSession({
+      cwd: repo,
+      // Loopback, so the control is accepted — but nothing is listening.
+      env: hostControlEnvironment({ location: 'http://127.0.0.1:1', capability: 'gone' }, env),
+      agent: undefined,
+      provider: 'codex',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: () => undefined,
+      report: (line) => {
+        reports.push(line);
+      },
+      detach,
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(1500);
+    expect(result.host).toEqual({
+      kind: 'idle-wake-limited',
+      reason: 'no reachable managed launcher',
+    });
+    expect(detach).not.toHaveBeenCalled();
+    expect(reports.join('\n')).toMatch(/idle messages cannot wake/iu);
+  });
+
+  it('leaves the inbox usable when Windows idle wake is unavailable', async () => {
+    const { repo, env } = workspace();
+    const context = openContext(repo, env);
+    context.repos.agents.upsert({
+      agentId: SENDER,
+      kind: 'claude-code',
+      owner: null,
+      model: null,
+      pid: null,
+      cwd: null,
+      worktree: null,
+      branch: null,
+      summary: null,
+      status: 'active',
+    });
+
+    const result = await registerSession({
+      cwd: repo,
+      env,
+      agent: undefined,
+      provider: 'codex',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: () => undefined,
+      report: () => undefined,
+    });
+
+    // The limitation is about idle wake only: the session is registered and
+    // its messages queue for it as usual.
+    expect(result.host?.kind).toBe('idle-wake-limited');
+    const codexAgent = agentIdForSession('codex', THREAD);
+    const sent = handleSendAgentMessage(context.repos, {
+      operation: 'prompt',
+      agentId: SENDER,
+      toAgentId: codexAgent,
+      content: 'for your next turn',
+      idempotencyKey: 'local-mode-1',
+    });
+    expect(sent.delivery).toBe('queued_pull');
+
+    const drained = drainInbox(context.repos, codexAgent, 'codex');
+    expect(drained.map((message) => message.messageId)).toEqual([sent.message.messageId]);
+    expect(context.repos.agentMessages.get(sent.message.messageId)?.status).toBe('delivered');
+  });
+
+  it('keeps the detached host path on macOS and Linux', async () => {
+    for (const platform of ['darwin', 'linux']) {
+      const { repo, env } = workspace();
+      const detached: HostStartRequest[] = [];
+      const reports: string[] = [];
+
+      const result = await registerSession({
+        cwd: repo,
+        env,
+        agent: undefined,
+        provider: 'codex',
+        hookPayload: SESSION_START,
+        platform,
+        write: () => undefined,
+        report: (line) => {
+          reports.push(line);
+        },
+        detach: (request) => {
+          detached.push(request);
+        },
+      });
+
+      expect(result.host).toEqual({ kind: 'detached' });
+      expect(detached).toEqual([{ agentId: agentIdForSession('codex', THREAD), threadId: THREAD }]);
+      expect(reports).toEqual([]);
+    }
+  });
+
+  it('asks for no host for a provider that is not Codex', async () => {
+    const { repo, env } = workspace();
+    const detach = vi.fn();
+    const out: string[] = [];
+
+    const result = await registerSession({
+      cwd: repo,
+      env,
+      agent: undefined,
+      provider: 'claude-code',
+      hookPayload: SESSION_START,
+      platform: 'win32',
+      write: (text) => {
+        out.push(text);
+      },
+      report: () => undefined,
+      detach,
+    });
+
+    expect(result.host).toBeNull();
+    expect(detach).not.toHaveBeenCalled();
+    expect(result.agentId).toBe(agentIdForSession('claude-code', THREAD));
+    expect(out.join('')).toContain(agentIdForSession('claude-code', THREAD));
   });
 });
