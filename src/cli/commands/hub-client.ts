@@ -107,10 +107,15 @@ export async function runHubConnect(
     throw new Error(`The private hub at ${apiUrl} rejected that key.`);
   }
 
-  writeCredentials(deps.env, { apiUrl, apiKey });
+  const replaced = readCredentials(deps.env);
+  writeCredentials(deps.env, { apiUrl, apiKey, scope: 'hub' });
   return (
     `Connected to ${apiUrl} as machine ${machineKey} on a private hub. ` +
-    `The key is saved in ${credentialsPath(deps.env)} and never shown.`
+    `The key is saved in ${credentialsPath(deps.env)} and never shown.` +
+    (replaced !== undefined &&
+    (replaced.apiUrl !== apiUrl || !('scope' in replaced) || replaced.scope !== 'hub')
+      ? ' Previous Concord API credentials were replaced.'
+      : '')
   );
 }
 

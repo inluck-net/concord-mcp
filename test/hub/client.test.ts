@@ -146,6 +146,7 @@ describe('concord hub client commands', () => {
     expect(JSON.parse(readFileSync(saved, 'utf8'))).toEqual({
       apiUrl: server.url,
       apiKey: KEY,
+      scope: 'hub',
     });
     if (process.platform !== 'win32') expect(statSync(saved).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(machinePath(deps.env), 'utf8'))).toEqual({
@@ -160,6 +161,23 @@ describe('concord hub client commands', () => {
     expect(machines).toHaveLength(1);
     expect(machines[0]).toMatchObject({ machineKey: 'machine-1', hostname: 'devbox' });
     expect(await checkKey(server.url, KEY)).toBe('ok');
+  });
+
+  it('keeps a fresh repository local until explicitly linked, then restores local mode', async () => {
+    const server = await startHub();
+    await runHubConnect({ url: server.url, keyStdin: true }, deps);
+
+    expect(cloudTargetFor(repo, deps.env, ORIGIN)).toBeUndefined();
+
+    await runHubLink({ project: undefined, replaceLocal: false }, deps);
+    expect(cloudTargetFor(repo, deps.env, ORIGIN)).toEqual({
+      apiUrl: server.url,
+      projectKey: 'github.com/acme/app',
+      source: 'link',
+    });
+
+    runHubUnlink(deps);
+    expect(cloudTargetFor(repo, deps.env, ORIGIN)).toBeUndefined();
   });
 
   it('rejects a remote plaintext URL before sending the key anywhere', async () => {
@@ -288,7 +306,7 @@ describe('concord hub client commands', () => {
     expect(unreachable).toContain('unreachable');
     expect(unreachable).not.toContain(KEY);
     // The saved key and identity survive the outage untouched.
-    expect(readCredentials(deps.env)).toEqual({ apiUrl: server.url, apiKey: KEY });
+    expect(readCredentials(deps.env)).toEqual({ apiUrl: server.url, apiKey: KEY, scope: 'hub' });
     expect(unreachable).toContain('machine-1');
   });
 
@@ -345,7 +363,7 @@ describe('concord hub client commands', () => {
     expect(cloudTargetFor(repo, deps.env, ORIGIN)).toBeUndefined();
     expect(localTask()).toBe('local work');
     // The hub keeps its state: the machine's login and registration survive.
-    expect(readCredentials(deps.env)).toEqual({ apiUrl: server.url, apiKey: KEY });
+    expect(readCredentials(deps.env)).toEqual({ apiUrl: server.url, apiKey: KEY, scope: 'hub' });
     expect(await checkKey(server.url, KEY)).toBe('ok');
 
     // Unlinking again is a no-op, and a workspace that was never linked says so.
