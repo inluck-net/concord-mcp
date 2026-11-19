@@ -35,6 +35,7 @@ import {
 } from '../codex-host-control.js';
 import { availablePort } from '../local-port.js';
 import { hostCodexInCloud } from './cloud-codex.js';
+import { codexPassthrough, runCodexPassthrough } from './codex-passthrough.js';
 import {
   copilotServerAddress,
   hostCopilot,
@@ -173,6 +174,12 @@ export function codexManagedLaunchContext(
 async function launchCodex(args: readonly string[], repoRoot: string): Promise<void> {
   const codex = executablePath('codex', process.env);
   if (codex === undefined) throw new Error('Codex CLI was not found on PATH.');
+  if (codexPassthrough(args)) {
+    // Not the TUI (e.g. Orca chat mode's `codex app-server`): run it as typed.
+    const code = await runCodexPassthrough(codex, args, process.env);
+    if (code !== 0) process.exitCode = code;
+    return;
+  }
   const port = await availablePort();
   const url = `ws://127.0.0.1:${String(port)}`;
   const tokenDirectory = mkdtempSync(join(tmpdir(), 'concord-codex-'));
